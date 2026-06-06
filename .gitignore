@@ -1,0 +1,30 @@
+# Node dependencies
+node_modules/
+dist/
+build/
+.env
+*.log
+
+# Python cash and temp files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+backend/temp_docs/
+
+# IDE files
+.vscode/
+.idea/
+.gemini/
+.system_generated/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
