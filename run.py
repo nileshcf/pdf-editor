@@ -2,26 +2,6 @@ import os
 import sys
 import subprocess
 import time
-import signal
-
-def run_command_in_dir(command, directory):
-    """Runs a shell command in a specific directory."""
-    print(f"Executing: {' '.join(command)} in {directory}")
-    return subprocess.Popen(
-        command,
-        cwd=directory,
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1
-    )
-
-def monitor_process(process, name):
-    """Reads stdout of a process in a non-blocking way and prints it."""
-    # We set stdout to non-blocking or just print lines
-    for line in iter(process.stdout.readline, ''):
-        print(f"[{name}] {line.strip()}")
 
 def main():
     root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -29,8 +9,8 @@ def main():
     frontend_dir = os.path.join(root_dir, "frontend")
 
     print("=== AeroPDF Starter Orchestrator ===")
-    
-    # 1. Install Python dependencies
+
+    # 1. Install Python dependencies using the current interpreter
     print("\n[1/4] Installing Python dependencies...")
     try:
         subprocess.run(
@@ -47,8 +27,9 @@ def main():
     print("\n[2/4] Installing Node dependencies...")
     if not os.path.exists(os.path.join(frontend_dir, "node_modules")):
         try:
+            # Use shell=True with a string command for cross-platform compatibility
             subprocess.run(
-                ["npm", "install"],
+                "npm install",
                 cwd=frontend_dir,
                 check=True,
                 shell=True
@@ -58,62 +39,70 @@ def main():
             print(f"[ERROR] Failed to run npm install: {e}")
             sys.exit(1)
     else:
-        print("[OK] node_modules already exists. Skipping npm install.")
+        print("[OK] node_modules already present. Skipping npm install.")
 
-    # 3. Start Backend Server
-    print("\n[3/4] Launching FastAPI Backend...")
-    # Use sys.executable to ensure we run FastAPI in the same python environment
-    backend_cmd = ["uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000"]
+    # 3. Start Backend — use sys.executable -m uvicorn so it runs inside the
+    #    current Python environment regardless of PATH.
+    print("\n[3/4] Launching FastAPI Backend on http://127.0.0.1:8000 ...")
     backend_proc = subprocess.Popen(
-        backend_cmd,
+        [sys.executable, "-m", "uvicorn", "main:app",
+         "--host", "127.0.0.1", "--port", "8000", "--reload"],
         cwd=backend_dir,
-        shell=True,
-        stdout=subprocess.DEVNULL, # Suppress noisy logs, uvicorn outputs directly
-        stderr=subprocess.DEVNULL
+        # Do NOT use shell=True here — we pass a proper list so Python finds
+        # uvicorn inside the active venv/environment without relying on PATH.
     )
-    time.sleep(2)  # Give backend time to start up
+    time.sleep(2)  # Give uvicorn a moment to bind the port
 
-    # 4. Start Frontend Client Dev Server
-    print("\n[4/4] Launching React Vite Server...")
-    frontend_cmd = ["npm", "run", "dev"]
+    # Check the backend actually started
+    if backend_proc.poll() is not None:
+        print("[ERROR] Backend failed to start. Check that uvicorn and pymupdf are installed.")
+        sys.exit(1)
+
+    # 4. Start Frontend Vite dev server
+    print("\n[4/4] Launching React Vite Frontend on http://localhost:5173 ...")
     frontend_proc = subprocess.Popen(
-        frontend_cmd,
+        "npm run dev",
         cwd=frontend_dir,
         shell=True
     )
 
     print("\n==============================================")
-    print("AeroPDF Editor is now launching!")
-    print("- Backend API:  http://127.0.0.1:8000")
-    print("- Web Editor:   http://localhost:5173")
+    print("  AeroPDF Editor is running!")
+    print("  Backend API  →  http://127.0.0.1:8000")
+    print("  Web Editor   →  http://localhost:5173")
     print("==============================================")
-    print("Press Ctrl+C to terminate both servers.")
+    print("Press Ctrl+C to stop both servers.\n")
 
     try:
-        # Keep running until interrupted
         while True:
-            # Check if processes died
             if backend_proc.poll() is not None:
-                print("Backend server terminated unexpectedly.")
+                print("[ERROR] Backend terminated unexpectedly.")
                 break
             if frontend_proc.poll() is not None:
-                print("Frontend dev server terminated unexpectedly.")
+                print("[ERROR] Frontend dev server terminated unexpectedly.")
                 break
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\nStopping processes gracefully...")
+        print("\nShutting down gracefully...")
     finally:
-        # Terminate processes
+        # Kill the entire process trees on all platforms
         try:
-            # On windows, taskkill might be cleaner for shell subprocesses
             if os.name == 'nt':
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(backend_proc.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(frontend_proc.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(backend_proc.pid)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(frontend_proc.pid)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
             else:
-                backend_proc.terminate()
-                frontend_proc.terminate()
-        except:
-            pass
+                import signal
+                os.killpg(os.getpgid(backend_proc.pid), signal.SIGTERM)
+                os.killpg(os.getpgid(frontend_proc.pid), signal.SIGTERM)
+        except Exception:
+            backend_proc.terminate()
+            frontend_proc.terminate()
         print("Servers stopped. Goodbye!")
 
 if __name__ == "__main__":

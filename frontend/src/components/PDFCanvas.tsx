@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import { createWorker } from 'tesseract.js';
-import { Eye, Sparkles } from 'lucide-react';
 
-// Initialize PDF.js Worker using standard CDN
-pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+// Worker CDN must match pdfjs-dist version (3.4.120)
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+
+const SCALE = 1.25;
 
 interface PDFPage {
   number: number;
@@ -34,188 +36,186 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
   page,
   pdfUrl,
   onSelectBlock,
-  onOCRComplete
+  onOCRComplete,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const [scale] = useState(1.25); // Scale of PDF page
   const [rendering, setRendering] = useState(false);
   const [ocrRunning, setOcrRunning] = useState(false);
   const [ocrProgress, setOcrProgress] = useState(0);
   const [ocrStatus, setOcrStatus] = useState('');
 
-  // Render PDF Page onto HTML5 canvas
+  /**
+   * Bug fix: the old code used a stale `rendering` state closure as a guard,
+   * which meant switching pages while a render was in progress would leave the
+   * canvas blank. The correct pattern is a per-invocation `cancelled` flag.
+   */
   useEffect(() => {
+    let cancelled = false;
     let renderTask: any = null;
 
     const renderPage = async () => {
-      if (!canvasRef.current || rendering) return;
-
+      if (!canvasRef.current) return;
+      setRendering(true);
       try {
-        setRendering(true);
         const canvas = canvasRef.current;
-        const context = canvas.getContext('2d');
-        if (!context) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx || cancelled) return;
 
-        // Load document through PDF.js
         const loadingTask = pdfjsLib.getDocument(pdfUrl);
         const pdf = await loadingTask.promise;
-        const pdfPage = await pdf.getPage(page.number);
+        if (cancelled) return;
 
-        const viewport = pdfPage.getViewport({ scale });
+        const pdfPage = await pdf.getPage(page.number);
+        if (cancelled) return;
+
+        const viewport = pdfPage.getViewport({ scale: SCALE });
         canvas.width = viewport.width;
         canvas.height = viewport.height;
 
-        const renderContext = {
-          canvasContext: context,
-          viewport: viewport,
-        };
-
-        renderTask = pdfPage.render(renderContext);
+        renderTask = pdfPage.render({ canvasContext: ctx, viewport });
         await renderTask.promise;
-      } catch (err) {
-        console.error('Error rendering PDF page:', err);
+      } catch (err: any) {
+        if (err?.name !== 'RenderingCancelledException') {
+          console.error('PDF render error:', err);
+        }
       } finally {
-        setRendering(false);
+        if (!cancelled) setRendering(false);
       }
     };
 
     renderPage();
-
     return () => {
-      if (renderTask) {
-        renderTask.cancel();
-      }
+      cancelled = true;
+      renderTask?.cancel();
     };
-  }, [pdfUrl, page.number, scale]);
+  }, [pdfUrl, page.number]);
 
-  // Client-Side OCR scanner using Tesseract.js (Web Worker)
+  // OCR via Tesseract.js
   const runLocalOCR = async () => {
-    if (!canvasRef.current) return;
+    if (!canvasRef.current || ocrRunning) return;
     try {
       setOcrRunning(true);
-      setOcrStatus('Initializing OCR engine...');
       setOcrProgress(5);
+      setOcrStatus('Starting OCR engine...');
 
       const canvas = canvasRef.current;
       const worker = await createWorker({
-        logger: (m) => {
+        logger: (m: any) => {
           if (m.status === 'recognizing text') {
-            setOcrStatus('Extracting characters...');
+            setOcrStatus('Reading characters...');
             setOcrProgress(Math.round(m.progress * 100));
           }
         },
       });
 
-      setOcrStatus('Loading English language parameters...');
+      setOcrStatus('Loading English language data...');
       await worker.loadLanguage('eng');
       await worker.initialize('eng');
 
-      setOcrStatus('Scanning document elements...');
-      // Extract image data directly from canvas context
+      setOcrStatus('Scanning page...');
       const dataUrl = canvas.toDataURL('image/png');
       const { data } = await worker.recognize(dataUrl);
 
-      // Map Tesseract paragraph bounding boxes back to PDF coordinate spaces
-      const ocrBlocks: any[] = [];
-      const canvasWidth = canvas.width;
-      const canvasHeight = canvas.height;
-
-      data.paragraphs.forEach((p) => {
-        const { x0, y0, x1, y1 } = p.bbox;
-        
-        // Translate back from render canvas coordinate bounds to PDF points bounds
-        const pdfX0 = (x0 / canvasWidth) * page.width;
-        const pdfY0 = (y0 / canvasHeight) * page.height;
-        const pdfX1 = (x1 / canvasWidth) * page.width;
-        const pdfY1 = (y1 / canvasHeight) * page.height;
-
-        ocrBlocks.push({
-          bbox: [pdfX0, pdfY0, pdfX1, pdfY1],
-          lines: [
-            {
+      const cw = canvas.width;
+      const ch = canvas.height;
+      const ocrBlocks: any[] = data.paragraphs
+        .filter((p: any) => p.text.trim().length > 0)
+        .map((p: any) => {
+          const { x0, y0, x1, y1 } = p.bbox;
+          const pdfX0 = (x0 / cw) * page.width;
+          const pdfY0 = (y0 / ch) * page.height;
+          const pdfX1 = (x1 / cw) * page.width;
+          const pdfY1 = (y1 / ch) * page.height;
+          return {
+            bbox: [pdfX0, pdfY0, pdfX1, pdfY1],
+            lines: [{
               bbox: [pdfX0, pdfY0, pdfX1, pdfY1],
-              spans: [
-                {
-                  text: p.text.trim(),
-                  bbox: [pdfX0, pdfY0, pdfX1, pdfY1],
-                  font: 'Helvetica',
-                  size: 12,
-                  color: '#000000'
-                }
-              ]
-            }
-          ]
+              spans: [{
+                text: p.text.trim(),
+                bbox: [pdfX0, pdfY0, pdfX1, pdfY1],
+                font: 'Helvetica',
+                size: 12,
+                color: '#000000',
+              }],
+            }],
+          };
         });
-      });
 
       await worker.terminate();
       setOcrRunning(false);
       onOCRComplete(page.number, ocrBlocks);
     } catch (err) {
-      console.error('OCR Error:', err);
-      setOcrStatus('OCR Failed.');
+      console.error('OCR error:', err);
+      setOcrStatus('OCR failed. Please try again.');
       setOcrRunning(false);
     }
   };
 
-  // Check if this is a scanned document (has images but zero text blocks)
   const isScanned = page.blocks.length === 0 && page.images.length > 0;
 
   return (
     <div
-      ref={containerRef}
       className="pdf-page-container fade-in"
-      style={{
-        width: page.width * scale,
-        height: page.height * scale,
-      }}
+      style={{ width: page.width * SCALE, height: page.height * SCALE }}
     >
-      {/* Dynamic OCR Loading overlay */}
-      {ocrRunning && (
-        <div className="ocr-progress-overlay">
-          <Sparkles className="dropzone-icon" style={{ width: '40px', height: '40px' }} />
-          <span style={{ fontSize: '1rem', fontWeight: 600 }}>{ocrStatus}</span>
-          <div className="progress-bar-container">
-            <div className="progress-bar-fill" style={{ width: `${ocrProgress}%` }}></div>
-          </div>
-          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{ocrProgress}% complete</span>
+      {/* Rendering spinner */}
+      {rendering && (
+        <div style={{
+          position: 'absolute', inset: 0, zIndex: 25,
+          display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center', gap: '10px',
+          background: 'rgba(248,244,238,0.85)',
+          borderRadius: 'calc(var(--r-sm) - 3px)',
+        }}>
+          <span style={{ fontWeight: 800, color: 'var(--medium)', fontSize: '0.9rem' }}>
+            Rendering page {page.number}...
+          </span>
         </div>
       )}
 
-      {/* Render Canvas */}
+      {/* OCR progress overlay */}
+      {ocrRunning && (
+        <div className="ocr-progress-overlay">
+          <span style={{ fontWeight: 800, fontSize: '0.95rem', color: 'var(--dark)' }}>
+            {ocrStatus}
+          </span>
+          <div className="progress-bar-container">
+            <div className="progress-bar-fill" style={{ width: `${ocrProgress}%` }} />
+          </div>
+          <span style={{ fontSize: '0.78rem', color: 'var(--medium)', fontWeight: 700 }}>
+            {ocrProgress}% complete
+          </span>
+        </div>
+      )}
+
+      {/* PDF canvas */}
       <canvas ref={canvasRef} className="pdf-canvas" />
 
-      {/* Overlay Transparent WYSIWYG Editable Layer */}
+      {/* WYSIWYG editable overlay */}
       <div className="editing-overlay-layer">
-        {page.blocks.map((block, bIdx) => {
-          return block.lines.map((line: any, lIdx: any) => {
-            return line.spans.map((span: any, sIdx: any) => {
+        {page.blocks.map((block, bIdx) =>
+          block.lines.map((line: any, lIdx: number) =>
+            line.spans.map((span: any, sIdx: number) => {
               const [x0, y0, x1, y1] = span.bbox;
-              
-              // Scale coordinates dynamically for screen layout
-              const left = x0 * scale;
-              const top = y0 * scale;
-              const width = (x1 - x0) * scale;
-              const height = (y1 - y0) * scale;
-              
-              // Estimate standard CSS font size based on scale
-              const cssFontSize = span.size * scale;
-              
+              const fontFamily =
+                span.font?.includes('Courier') ? 'Courier New' :
+                span.font?.includes('Times') ? 'Times New Roman' :
+                'Arial';
+
               return (
                 <div
-                  key={`span-${bIdx}-${lIdx}-${sIdx}`}
+                  key={`${bIdx}-${lIdx}-${sIdx}`}
                   className="editable-text-block"
+                  title="Double-click to edit"
                   style={{
-                    left: `${left}px`,
-                    top: `${top}px`,
-                    width: `${width + 4}px`,
-                    height: `${height + 2}px`,
-                    fontSize: `${cssFontSize}px`,
-                    color: 'transparent', // Make text transparent so it hides the underlying Canvas pixels
-                    fontFamily: span.font.includes('Courier') ? 'Courier New' : span.font.includes('Times') ? 'Times New Roman' : 'Arial'
+                    left: `${x0 * SCALE}px`,
+                    top: `${y0 * SCALE}px`,
+                    width: `${(x1 - x0) * SCALE + 4}px`,
+                    height: `${(y1 - y0) * SCALE + 2}px`,
+                    fontSize: `${span.size * SCALE}px`,
+                    fontFamily,
+                    color: 'transparent',
                   }}
-                  title="Double click to edit font or content"
                   onDoubleClick={(e) => {
                     e.stopPropagation();
                     onSelectBlock({
@@ -224,46 +224,46 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
                       text: span.text,
                       font: span.font,
                       size: span.size,
-                      color: span.color
+                      color: span.color,
                     });
                   }}
                 >
                   {span.text}
                 </div>
               );
-            });
-          });
-        })}
+            })
+          )
+        )}
 
-        {/* Scan Helper box if page is scanned */}
-        {isScanned && (
+        {/* Scanned page OCR prompt */}
+        {isScanned && !ocrRunning && (
           <div
             className="scanned-img-highlight"
-            style={{
-              left: '5%',
-              top: '5%',
-              width: '90%',
-              height: '90%',
-            }}
+            style={{ left: '5%', top: '5%', width: '90%', height: '90%' }}
             onClick={runLocalOCR}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => e.key === 'Enter' && runLocalOCR()}
           >
             <div className="ocr-prompt-badge">
-              Scanned Page Detected - Click to Run OCR
+              Scanned page detected -- click to run OCR
             </div>
             <div style={{
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              height: '100%',
-              gap: '12px',
-              color: 'var(--warning)',
-              opacity: 0.8
+              display: 'flex', flexDirection: 'column', alignItems: 'center',
+              justifyContent: 'center', height: '100%', gap: '14px',
             }}>
-              <Eye size={36} />
-              <span style={{ fontSize: '1rem', fontWeight: 600 }}>Convert image elements to editable text layers</span>
-              <button className="btn btn-primary" style={{ background: 'var(--warning)', color: '#000', fontWeight: 600 }}>
-                Run OCR Text Extraction
+              <span style={{
+                fontSize: '1rem', fontWeight: 800,
+                color: 'var(--orange)', textAlign: 'center', maxWidth: '280px',
+              }}>
+                This page has no text layer.
+                <br />Click to extract text with OCR!
+              </span>
+              <button
+                className="btn btn-yellow"
+                style={{ pointerEvents: 'none' }}
+              >
+                Run OCR
               </button>
             </div>
           </div>

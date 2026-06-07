@@ -1,37 +1,18 @@
-import React, { useState, useRef } from 'react';
-import { UploadCloud, FileText, Download, AlertCircle, Sparkles } from 'lucide-react';
+import React, { useState, useRef, useCallback } from 'react';
+import { Download, AlertCircle, CheckCircle, X } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { PDFCanvas } from './components/PDFCanvas';
 import { PropertiesPanel } from './components/PropertiesPanel';
 import { CommandConsole } from './components/CommandConsole';
 
-interface PDFPage {
-  number: number;
-  width: number;
-  height: number;
-  blocks: any[];
-  images: any[];
-}
-
+interface PDFPage { number: number; width: number; height: number; blocks: any[]; images: any[]; }
 interface Session {
-  session_id: string;
-  filename: string;
-  metadata: {
-    title: string;
-    author: string;
-    pages: number;
-  };
+  session_id: string; filename: string;
+  metadata: { title: string; author: string; pages: number; };
   pages: PDFPage[];
 }
-
-interface SelectedBlock {
-  pageNumber: number;
-  bbox: number[];
-  text: string;
-  font: string;
-  size: number;
-  color: string;
-}
+interface SelectedBlock { pageNumber: number; bbox: number[]; text: string; font: string; size: number; color: string; }
+interface Toast { text: string; type: 'success' | 'error' | 'info' | null; }
 
 const API_BASE = import.meta.env.VITE_API_BASE || '/api';
 
@@ -41,291 +22,225 @@ function App() {
   const [selectedBlock, setSelectedBlock] = useState<SelectedBlock | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  const [consoleMsg, setConsoleMsg] = useState<{ text: string; type: 'success' | 'error' | 'info' | null }>({ text: '', type: null });
-
+  const [toast, setToast] = useState<Toast>({ text: '', type: null });
+  const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Trigger file upload API
+  const showToast = (text: string, type: Toast['type']) => {
+    setToast({ text, type });
+    setTimeout(() => setToast({ text: '', type: null }), 4000);
+  };
+
   const handleFileUpload = async (file: File) => {
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
+      setError('Only PDF files are supported.');
+      return;
+    }
     setIsLoading(true);
     setError(null);
     const formData = new FormData();
     formData.append('file', file);
-
     try {
-      const response = await fetch(`${API_BASE}/upload`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(errData.detail || 'Failed to upload and parse PDF file.');
-      }
-
-      const data: Session = await response.json();
-      setSession(data);
-      setActivePage(1);
-      setSelectedBlock(null);
-      setConsoleMsg({ text: `File "${file.name}" uploaded successfully!`, type: 'success' });
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setIsLoading(false);
-    }
+      const res = await fetch(API_BASE + '/upload', { method: 'POST', body: formData });
+      if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Upload failed.'); }
+      const data: Session = await res.json();
+      setSession(data); setActivePage(1); setSelectedBlock(null);
+      const p = data.metadata.pages;
+      showToast('"' + file.name + '" loaded -- ' + p + ' page' + (p !== 1 ? 's' : '') + '!', 'success');
+    } catch (err: any) { setError(err.message); }
+    finally { setIsLoading(false); }
   };
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      handleFileUpload(e.target.files[0]);
-    }
+    if (e.target.files?.[0]) { handleFileUpload(e.target.files[0]); e.target.value = ''; }
   };
 
-  // Perform block updates (saving text modification with style)
+  const onDragOver = useCallback((e: React.DragEvent) => { e.preventDefault(); setIsDragging(true); }, []);
+  const onDragLeave = useCallback((e: React.DragEvent) => { e.preventDefault(); setIsDragging(false); }, []);
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault(); setIsDragging(false);
+    const f = e.dataTransfer.files?.[0]; if (f) handleFileUpload(f);
+  }, []);
+
   const handleSaveBlockEdits = async (updatedText: string, size: number, font: string, color: string) => {
     if (!session || !selectedBlock) return;
-    setIsLoading(true);
-    setError(null);
-
+    setIsLoading(true); setError(null);
     try {
-      const response = await fetch(`${API_BASE}/edit-block/${session.session_id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          page_number: selectedBlock.pageNumber,
-          original_bbox: selectedBlock.bbox,
-          new_text: updatedText,
-          font_size: size,
-          font_name: font,
-          hex_color: color
-        }),
+      const res = await fetch(API_BASE + '/edit-block/' + session.session_id, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ page_number: selectedBlock.pageNumber, original_bbox: selectedBlock.bbox,
+          new_text: updatedText, font_size: size, font_name: font, hex_color: color }),
       });
-
-      if (!response.ok) throw new Error('Failed to save edited block on backend.');
-
-      const data = await response.json();
-      // Update session pages list state
-      setSession({
-        ...session,
-        pages: data.pages
-      });
-      setSelectedBlock(null);
-      setConsoleMsg({ text: 'Text block updated successfully!', type: 'success' });
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setIsLoading(false);
-    }
+      if (!res.ok) throw new Error('Failed to save block.');
+      const data = await res.json();
+      setSession({ ...session, pages: data.pages }); setSelectedBlock(null);
+      showToast('Text block updated!', 'success');
+    } catch (err: any) { setError(err.message); }
+    finally { setIsLoading(false); }
   };
 
-  // Execute global search and replace on page or all pages
   const handleSearchReplace = async (searchTerm: string, replacement: string, pageOnly: boolean) => {
     if (!session) return;
-    setIsLoading(true);
-    setError(null);
-
+    setIsLoading(true); setError(null);
     try {
-      const response = await fetch(`${API_BASE}/replace/${session.session_id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          search_term: searchTerm,
-          replacement: replacement,
-          page_number: pageOnly ? activePage : null
-        }),
+      const res = await fetch(API_BASE + '/replace/' + session.session_id, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ search_term: searchTerm, replacement,
+          page_number: pageOnly ? activePage : null }),
       });
-
-      if (!response.ok) throw new Error('Failed to execute search and replace.');
-
-      const data = await response.json();
-      setSession({
-        ...session,
-        pages: data.pages
-      });
-      setSelectedBlock(null);
-      setConsoleMsg({
-        text: `Replaced ${data.replacements_made} instances of "${searchTerm}".`,
-        type: 'success'
-      });
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setIsLoading(false);
-    }
+      if (!res.ok) throw new Error('Search/replace failed.');
+      const data = await res.json();
+      setSession({ ...session, pages: data.pages }); setSelectedBlock(null);
+      const n = data.replacements_made;
+      showToast('Replaced ' + n + ' instance' + (n !== 1 ? 's' : '') + ' of "' + searchTerm + '"',
+        n > 0 ? 'success' : 'info');
+    } catch (err: any) { setError(err.message); }
+    finally { setIsLoading(false); }
   };
 
-  // Run command line interpretations
-  const handleExecuteCommand = async (commandStr: string) => {
+  const handleExecuteCommand = async (cmd: string) => {
     if (!session) return;
-    setIsLoading(true);
-    setError(null);
-
+    setIsLoading(true); setError(null);
     try {
-      const response = await fetch(`${API_BASE}/command/${session.session_id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: commandStr }),
+      const res = await fetch(API_BASE + '/command/' + session.session_id, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: cmd }),
       });
-
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.message || 'Failed to run command.');
-
-      setSession({
-        ...session,
-        pages: data.pages
-      });
-      setSelectedBlock(null);
-      setConsoleMsg({ text: data.message, type: 'success' });
-    } catch (err: any) {
-      setConsoleMsg({ text: err.message, type: 'error' });
-    } finally {
-      setIsLoading(false);
-    }
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Command failed.');
+      setSession({ ...session, pages: data.pages }); setSelectedBlock(null);
+      showToast(data.message, 'success');
+    } catch (err: any) { showToast(err.message, 'error'); }
+    finally { setIsLoading(false); }
   };
 
-  // Export and download PDF
-  const handleExportPDF = () => {
-    if (!session) return;
-    window.open(`${API_BASE}/download/${session.session_id}`, '_blank');
-  };
+  const handleExportPDF = () => { if (session) window.open(API_BASE + '/download/' + session.session_id, '_blank'); };
 
-  // Local OCR completion callback
   const handleOCRComplete = (pageNum: number, ocrBlocks: any[]) => {
     if (!session) return;
-    // Inject ocrBlocks into targeted page blocks list to enable dynamic typing overlay
-    const updatedPages = session.pages.map((p) => {
-      if (p.number === pageNum) {
-        return {
-          ...p,
-          blocks: [...p.blocks, ...ocrBlocks]
-        };
-      }
-      return p;
-    });
-
-    setSession({
-      ...session,
-      pages: updatedPages
-    });
-    setConsoleMsg({ text: 'OCR processing complete! Text is now editable.', type: 'success' });
+    setSession({ ...session, pages: session.pages.map((p) =>
+      p.number === pageNum ? { ...p, blocks: [...p.blocks, ...ocrBlocks] } : p) });
+    showToast('OCR complete -- text is now editable!', 'success');
   };
+
+  const toastBg = toast.type === 'error' ? 'var(--red)' : toast.type === 'success' ? 'var(--green)' : 'var(--dark)';
 
   return (
     <div className="app-container">
-      {/* Header bar */}
       <header className="header">
         <div className="app-logo">
-          <FileText size={22} style={{ color: 'var(--accent-light)' }} />
-          <span>AeroPDF Editor</span>
+          <span style={{ fontSize: '1.5rem', lineHeight: 1 }}>PDF</span>
+          <span>AeroPDF</span>
         </div>
-
-        {session && (
+        {session ? (
           <>
             <CommandConsole onExecuteCommand={handleExecuteCommand} isLoading={isLoading} />
-            <button className="btn btn-primary" onClick={handleExportPDF}>
-              <Download size={16} /> Export PDF
+            <button className="btn btn-export" onClick={handleExportPDF}>
+              <Download size={15} /> Export PDF
             </button>
           </>
+        ) : (
+          <span style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.88rem', fontWeight: 700 }}>
+            Upload a PDF to get started
+          </span>
         )}
       </header>
 
-      {/* Main Workspace Router */}
       {!session ? (
         <div className="upload-overlay fade-in">
-          <div style={{ textAlign: 'center', marginBottom: '32px' }}>
-            <h1 style={{ fontSize: '2.5rem', fontWeight: 700, margin: '0 0 12px 0', background: 'var(--accent-gradient)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-              Advanced In-Browser PDF Editor
+          <div style={{ textAlign: 'center', marginBottom: '28px' }}>
+            <h1 style={{ fontSize: '2.2rem', fontWeight: 900, color: 'var(--red)', margin: '0 0 10px 0', letterSpacing: '-0.5px' }}>
+              Don't let bad PDFs win.
             </h1>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '1.05rem', maxWidth: '500px', margin: '0 auto' }}>
-              Upload, redact, edit, and run fast OCR text extractions directly in your viewport without losing formatting.
+            <p style={{ color: 'var(--medium)', fontSize: '1rem', maxWidth: '460px', margin: '0 auto', fontWeight: 600 }}>
+              Edit text, run OCR on scanned pages, and export without losing formatting.
             </p>
           </div>
 
           <div
-            className="dropzone"
+            className={'dropzone' + (isDragging ? ' drag-active' : '')}
             onClick={() => fileInputRef.current?.click()}
+            onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}
+            role="button" tabIndex={0}
+            onKeyDown={(e) => e.key === 'Enter' && fileInputRef.current?.click()}
           >
-            <UploadCloud className="dropzone-icon" />
-            <h3 style={{ margin: '0 0 8px 0', fontSize: '1.15rem' }}>Drag & Drop PDF document</h3>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '0 0 20px 0' }}>or click to browse local files</p>
-            <button className="btn btn-secondary" disabled={isLoading}>
-              {isLoading ? 'Processing...' : 'Browse Documents'}
-            </button>
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={onFileChange}
-              accept="application/pdf"
-              style={{ display: 'none' }}
-            />
+            {isLoading ? (
+              <p style={{ fontWeight: 800, fontSize: '1.05rem', color: 'var(--teal)' }}>Parsing PDF...</p>
+            ) : (
+              <>
+                <div style={{
+                  width: 72, height: 72,
+                  background: isDragging ? 'var(--teal)' : 'var(--bg)',
+                  border: '3px solid ' + (isDragging ? 'var(--teal-dark)' : 'var(--border)'),
+                  borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  marginBottom: '16px', transition: 'all 0.2s',
+                }}>
+                  <Download size={28} style={{ color: isDragging ? 'white' : 'var(--teal)', transform: 'rotate(180deg)' }} />
+                </div>
+                <h3 style={{ margin: '0 0 6px 0', fontSize: '1.1rem', fontWeight: 800 }}>
+                  {isDragging ? 'Drop your PDF here!' : 'Drag and drop your PDF here'}
+                </h3>
+                <p style={{ color: 'var(--medium)', fontSize: '0.85rem', margin: '0 0 20px 0', fontWeight: 600 }}>
+                  or click to browse files
+                </p>
+                <button className="btn btn-primary" style={{ pointerEvents: 'none' }}>Browse PDF</button>
+              </>
+            )}
+            <input type="file" ref={fileInputRef} onChange={onFileChange} accept="application/pdf" style={{ display: 'none' }} />
           </div>
 
           {error && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--danger)', marginTop: '20px', background: 'rgba(239, 68, 68, 0.07)', padding: '10px 16px', borderRadius: '8px', border: '1px solid rgba(239, 68, 68, 0.2)' }}>
-              <AlertCircle size={16} />
-              <span style={{ fontSize: '0.9rem' }}>{error}</span>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '10px', marginTop: '20px',
+              background: 'rgba(255,59,47,0.08)', border: '2px solid rgba(255,59,47,0.3)',
+              padding: '12px 18px', borderRadius: 'var(--r-md)', color: 'var(--red)',
+              maxWidth: '540px', width: '100%',
+            }}>
+              <AlertCircle size={18} style={{ flexShrink: 0 }} />
+              <span style={{ fontSize: '0.88rem', fontWeight: 700 }}>{error}</span>
+              <button onClick={() => setError(null)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', marginLeft: 'auto', color: 'var(--red)' }}>
+                <X size={16} />
+              </button>
             </div>
           )}
+
+          <div style={{ display: 'flex', gap: '10px', marginTop: '28px', flexWrap: 'wrap', justifyContent: 'center' }}>
+            {['Edit text', 'Find and replace', 'OCR scanned pages', 'Export PDF'].map((label) => (
+              <div key={label} style={{
+                background: 'var(--white)', border: '2.5px solid var(--border)',
+                borderRadius: 'var(--r-pill)', padding: '7px 16px',
+                fontSize: '0.82rem', fontWeight: 800, color: 'var(--dark)',
+              }}>{label}</div>
+            ))}
+          </div>
         </div>
       ) : (
         <div className="workspace-layout">
-          {/* Sidebar */}
-          <Sidebar
-            pages={session.pages}
-            activePage={activePage}
-            setActivePage={(pageNum) => {
-              setActivePage(pageNum);
-              setSelectedBlock(null);
-            }}
-          />
-
-          {/* Canvas Viewport */}
+          <Sidebar pages={session.pages} activePage={activePage} filename={session.filename}
+            setActivePage={(n) => { setActivePage(n); setSelectedBlock(null); }} />
           <main className="canvas-viewport">
-            {/* Status updates toast/status bar */}
-            {consoleMsg.text && (
-              <div style={{
-                position: 'absolute',
-                top: '20px',
-                left: '50%',
-                transform: 'translateX(-50%)',
-                zIndex: 40,
-                background: 'rgba(17, 24, 39, 0.85)',
-                border: '1px solid var(--border-glass)',
-                padding: '8px 16px',
-                borderRadius: '8px',
-                fontSize: '0.85rem',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '8px',
-                boxShadow: '0 10px 25px rgba(0, 0, 0, 0.5)',
-                color: consoleMsg.type === 'error' ? 'var(--danger)' : consoleMsg.type === 'success' ? 'var(--success)' : 'var(--text-primary)'
-              }} className="fade-in">
-                <Sparkles size={14} style={{ color: 'var(--accent-light)' }} />
-                <span>{consoleMsg.text}</span>
-                <button
-                  onClick={() => setConsoleMsg({ text: '', type: null })}
-                  style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', marginLeft: '12px' }}
-                >
-                  ✕
+            {toast.text && (
+              <div className="fade-in" style={{
+                position: 'absolute', top: '16px', left: '50%', transform: 'translateX(-50%)', zIndex: 40,
+                background: toastBg, color: 'white', padding: '10px 18px', borderRadius: 'var(--r-pill)',
+                fontSize: '0.85rem', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '8px',
+                boxShadow: '0 4px 16px rgba(0,0,0,0.15)', whiteSpace: 'nowrap',
+              }}>
+                {toast.type === 'success' ? <CheckCircle size={15} /> : toast.type === 'error' ? <AlertCircle size={15} /> : null}
+                {toast.text}
+                <button onClick={() => setToast({ text: '', type: null })}
+                  style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.8)', cursor: 'pointer', padding: '0 0 0 4px' }}>
+                  <X size={14} />
                 </button>
               </div>
             )}
-
-            <PDFCanvas
-              page={session.pages[activePage - 1]}
-              pdfUrl={`${API_BASE}/download/${session.session_id}`}
-              onSelectBlock={setSelectedBlock}
-              onOCRComplete={handleOCRComplete}
-            />
+            <PDFCanvas page={session.pages[activePage - 1]}
+              pdfUrl={API_BASE + '/download/' + session.session_id}
+              onSelectBlock={setSelectedBlock} onOCRComplete={handleOCRComplete} />
           </main>
-
-          {/* Properties Panel */}
-          <PropertiesPanel
-            selectedBlock={selectedBlock}
-            onSaveBlockEdits={handleSaveBlockEdits}
-            onSearchReplace={handleSearchReplace}
-            isLoading={isLoading}
-          />
+          <PropertiesPanel selectedBlock={selectedBlock} onSaveBlockEdits={handleSaveBlockEdits}
+            onSearchReplace={handleSearchReplace} isLoading={isLoading} activePage={activePage} />
         </div>
       )}
     </div>

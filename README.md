@@ -1,58 +1,115 @@
-# AeroPDF - Web-Based PDF Editor
+# AeroPDF — Web-Based PDF Editor
 
-AeroPDF is a high-fidelity, web-based PDF editor utilizing a FastAPI backend for core PDF structures/layout updates and a React + TypeScript + Vite frontend client that supports live WYSIWYG text overlay adjustments, client-side WebAssembly OCR, and command-driven actions.
+A browser-based PDF editor with WYSIWYG text editing, client-side OCR for scanned pages, and one-command local setup.
 
-## Core Features
-
-1. **WYSIWYG Text Editing**:
-   - PDF pages are rendered into HTML5 `<canvas>` elements using PDF.js.
-   - Text boxes are absolutely mapped using backend layout coordinate extraction.
-   - Double-clicking text boxes overlays a custom editable area to modify formatting and content directly.
-2. **Text Reflow (Scenario A)**:
-   - Modifying block paragraphs leverages the backend `insert_textbox` stream wrapping logic to reflow content safely.
-3. **Scanned Page OCR (Scenario B)**:
-   - Scanned pages are automatically detected.
-   - A single-click triggers local **Tesseract.js** OCR via browser Web Workers to convert static images into active editable text spans.
-4. **Command AI Console**:
-   - Issue text commands like `replace "Draft" with "Final"` or `replace "Original" with "Updated" on page 1` to batch process modifications.
+**Stack**: FastAPI + PyMuPDF (backend) · React + TypeScript + Vite + PDF.js (frontend)
 
 ---
 
-## Getting Started
+## Features
 
-### Prerequisites
+- **WYSIWYG text editing** — PDF pages render to `<canvas>` via PDF.js; transparent `<div>` overlays let you double-click any text span to edit it in the properties panel.
+- **Find & Replace** — replace a word or phrase across the whole document or a single page. Powered by PyMuPDF redaction + text insertion.
+- **Scanned page OCR** — pages with no text layer show an orange prompt; one click runs Tesseract.js in a Web Worker and makes the extracted text fully editable.
+- **AI command bar** — issue plain-English commands like `replace "Draft" with "Final"` or `replace "Old" with "New" on page 2`.
+- **Export** — download the modified PDF at any time.
 
-Make sure you have the following installed on your machine:
-- **Node.js** (v18+)
-- **Python** (3.8+)
-- **pip** (Python package installer)
+---
 
-### Quick Start
+## Quick start
 
-Simply run the orchestration script from the root folder:
+### Requirements
+
+- Python 3.8+
+- Node.js 18+
+
+### Run
 
 ```bash
+git clone https://github.com/nileshcf/pdf-editor.git
+cd pdf-editor
 python run.py
 ```
 
-The script will automatically:
-1. Detect and install Python backend dependencies (`fastapi`, `uvicorn`, `pymupdf`, `python-multipart`).
-2. Run `npm install` inside the `frontend/` directory if node modules are missing.
-3. Boot up the FastAPI backend on `http://127.0.0.1:8000`.
-4. Boot up the React Vite frontend on `http://localhost:5173`.
-5. Open your browser to `http://localhost:5173` and begin editing!
+`run.py` will:
+1. Install Python backend deps (`fastapi`, `uvicorn`, `pymupdf`, `python-multipart`).
+2. Run `npm install` inside `frontend/` if `node_modules` is missing.
+3. Start the FastAPI backend on `http://127.0.0.1:8000`.
+4. Start the Vite frontend on `http://localhost:5173` and open it in your browser.
 
-Press `Ctrl + C` in the console to cleanly shut down both servers.
+Press `Ctrl+C` to cleanly shut down both servers.
 
 ---
 
 ## Deployment
 
-### Vercel Multi-Service
-This repository supports deploying the frontend and backend together on Vercel using `vercel.json` experimental multi-services.
+### Vercel (recommended — frontend + backend together)
 
-1.  Deploy the root directory to Vercel.
-2.  Set the following environment variable on Vercel for the frontend service to align endpoints:
-    *   `VITE_API_BASE=/_/backend/api`
-3.  Vercel will build and route client requests automatically.
+1. Push this repo to GitHub and import it on [vercel.com](https://vercel.com).
+2. In **Project Settings → Environment Variables**, add the following for the **frontend** service:
 
+   | Key | Value |
+   |-----|-------|
+   | `VITE_API_BASE` | `/_/backend/api` |
+
+3. Deploy. Vercel will build the Vite frontend and run the FastAPI backend via `vercel.json` experimental multi-services.
+
+> **Note**: Sessions are stored in memory. A fresh upload is needed after each Vercel cold start.
+
+### Backend on Railway / Render + frontend on Vercel
+
+If you prefer separate services:
+
+1. Deploy `backend/` to Railway or Render (the `Dockerfile` is ready to use).
+2. On Vercel, set `VITE_API_BASE` to your backend's public URL + `/api` (e.g. `https://my-backend.railway.app/api`).
+3. On your backend service, set `CORS_ORIGINS` to your Vercel frontend URL or keep `allow_origins=["*"]` for development.
+
+### Docker (self-hosted)
+
+```bash
+docker-compose up --build
+# frontend → http://localhost:80
+# backend  → http://localhost:8000
+```
+
+---
+
+## Project structure
+
+```
+pdf-editor/
+├── run.py                  # Dev orchestrator
+├── vercel.json             # Vercel multi-service config
+├── docker-compose.yml
+├── CLAUDE.md               # AI codebase guide (architecture, gotchas, patterns)
+├── ARCHITECTURE.md         # Deep-dive: coordinate math, API schemas, OCR pipeline
+│
+├── backend/
+│   ├── main.py             # FastAPI routes
+│   ├── utils.py            # PDF manipulation (PyMuPDF)
+│   ├── requirements.txt
+│   └── Dockerfile
+│
+└── frontend/
+    ├── index.html
+    ├── vite.config.ts
+    ├── .env.example        # Copy to .env.local for production overrides
+    └── src/
+        ├── App.tsx
+        ├── index.css       # Global theme (Dumb Ways to Die flat style)
+        └── components/
+            ├── PDFCanvas.tsx
+            ├── Sidebar.tsx
+            ├── PropertiesPanel.tsx
+            └── CommandConsole.tsx
+```
+
+For a full architectural deep-dive — coordinate mapping math, API schemas, OCR pipeline — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+
+For an AI-readable codebase guide (patterns, gotchas, state flow) see [`CLAUDE.md`](./CLAUDE.md).
+
+---
+
+## Contributing
+
+PRs welcome. Run `tsc --noEmit` in `frontend/` before committing to catch type errors.
