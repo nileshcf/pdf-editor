@@ -10,6 +10,7 @@ prod.  Example::
 from __future__ import annotations
 
 import os
+import tempfile
 from functools import lru_cache
 from typing import List
 
@@ -17,15 +18,22 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _default_temp_dir() -> str:
+    """Pick a writable session-storage root.
+
+    On serverless platforms (Vercel, AWS Lambda) the deployment filesystem is
+    read-only and only the system temp dir (``/tmp``) is writable, so we root
+    storage there by default.  This is writable everywhere — local, Docker and
+    serverless — and keeps the repo clean.  Override with ``AEROPDF_TEMP_DIR``.
+    """
+    return os.path.join(tempfile.gettempdir(), "aeropdf_sessions")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AEROPDF_", env_file=".env", extra="ignore")
 
     # --- Storage -----------------------------------------------------------
-    temp_dir: str = Field(
-        default_factory=lambda: os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "temp_docs"
-        )
-    )
+    temp_dir: str = Field(default_factory=_default_temp_dir)
 
     # --- Upload limits -----------------------------------------------------
     max_file_mb: int = 50

@@ -95,8 +95,14 @@ class SessionManager:
         self._sessions: Dict[str, Session] = {}
         self._global_lock = threading.Lock()
         self._now = now
-        os.makedirs(settings.temp_dir, exist_ok=True)
-        self._load_existing()
+        # Never let storage setup crash the process at import time (e.g. a
+        # read-only FS on misconfigured serverless): degrade to empty state and
+        # surface a clean error later when an upload actually needs the dir.
+        try:
+            os.makedirs(settings.temp_dir, exist_ok=True)
+            self._load_existing()
+        except OSError as exc:
+            log.error("Could not initialise session storage at %s: %s", settings.temp_dir, exc)
 
     # ------------------------------------------------------------------ #
     #  Lifecycle

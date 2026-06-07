@@ -110,7 +110,7 @@ Each upload creates a UUID session under `backend/temp_docs/<session_id>/` with 
 - **Concurrency** is safe — each session has a `threading.Lock`; PyMuPDF runs in a thread-pool via `run_in_threadpool`.
 - **Durability** — sessions + full history survive a restart (manifest is reloaded on startup). Idle sessions older than `AEROPDF_SESSION_TTL_HOURS` (default 24) are purged hourly.
 
-⚠️ On Vercel (serverless) the default temp dir may be read-only and is ephemeral — set `AEROPDF_TEMP_DIR=/tmp/aeropdf` and expect sessions to reset between cold starts.
+⚠️ **Serverless caveat (Vercel/Lambda):** storage defaults to the system temp dir (`/tmp`, the only writable path), but `/tmp` is **per-instance and ephemeral** — a follow-up edit/download request can land on a different cold instance with an empty `/tmp` and `_sessions` dict, returning 404. Stateful editing therefore needs either (a) a long-lived host (Railway/Render/Fly/Docker), or (b) external session storage (S3 for blobs + Redis/DB for the manifest). Single upload-only flows are fine on serverless.
 
 ### OCR pipeline
 
@@ -235,7 +235,7 @@ Alternatively, deploy the backend separately (Railway / Render) and set `VITE_AP
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `AEROPDF_TEMP_DIR` | `backend/temp_docs` | Session storage root |
+| `AEROPDF_TEMP_DIR` | `<system temp>/aeropdf_sessions` | Session storage root (system temp is writable on serverless too) |
 | `AEROPDF_MAX_FILE_MB` | `50` | Upload size limit |
 | `AEROPDF_MAX_PAGES` | `2000` | Page-count limit |
 | `AEROPDF_ALLOWED_ORIGINS` | `localhost:5173` | CORS allowlist (`*` for dev) |
