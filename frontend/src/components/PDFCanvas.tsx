@@ -28,6 +28,9 @@ interface SelectedBlock {
 interface PDFCanvasProps {
   page: PDFPage;
   pdfUrl: string;
+  // Bumped on every committed edit/undo/redo so the canvas re-fetches and
+  // re-renders the latest version (the download URL itself is static).
+  docVersion: number;
   onSelectBlock: (block: SelectedBlock) => void;
   onOCRComplete: (pageNum: number, ocrBlocks: any[]) => void;
 }
@@ -35,6 +38,7 @@ interface PDFCanvasProps {
 export const PDFCanvas: React.FC<PDFCanvasProps> = ({
   page,
   pdfUrl,
+  docVersion,
   onSelectBlock,
   onOCRComplete,
 }) => {
@@ -61,7 +65,9 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
         const ctx = canvas.getContext('2d');
         if (!ctx || cancelled) return;
 
-        const loadingTask = pdfjsLib.getDocument(pdfUrl);
+        // Cache-bust so PDF.js fetches the freshly-edited document, not a stale copy.
+        const versionedUrl = pdfUrl + (pdfUrl.includes('?') ? '&' : '?') + 'v=' + docVersion;
+        const loadingTask = pdfjsLib.getDocument(versionedUrl);
         const pdf = await loadingTask.promise;
         if (cancelled) return;
 
@@ -88,7 +94,7 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
       cancelled = true;
       renderTask?.cancel();
     };
-  }, [pdfUrl, page.number]);
+  }, [pdfUrl, page.number, docVersion]);
 
   // OCR via Tesseract.js
   const runLocalOCR = async () => {

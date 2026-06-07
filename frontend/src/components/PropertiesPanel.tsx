@@ -11,8 +11,13 @@ interface SelectedBlock {
 
 interface PropertiesPanelProps {
   selectedBlock: SelectedBlock | null;
-  onSaveBlockEdits: (updatedText: string, size: number, font: string, color: string) => void;
-  onSearchReplace: (searchTerm: string, replacement: string, pageOnly: boolean) => void;
+  onSaveBlockEdits: (updatedText: string, size: number, font: string, color: string, align: number) => void;
+  onSearchReplace: (
+    searchTerm: string,
+    replacement: string,
+    pageOnly: boolean,
+    opts: { caseSensitive: boolean; wholeWord: boolean }
+  ) => void;
   isLoading: boolean;
   activePage: number;
 }
@@ -31,6 +36,13 @@ const Card: React.FC<{ children: React.ReactNode; accent?: string }> = ({ childr
   }}>{children}</div>
 );
 
+const Check: React.FC<{ label: string; checked: boolean; onChange: (v: boolean) => void }> = ({ label, checked, onChange }) => (
+  <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', fontWeight: 700, color: 'var(--dark)', cursor: 'pointer' }}>
+    <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+    {label}
+  </label>
+);
+
 export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
   selectedBlock, onSaveBlockEdits, onSearchReplace, isLoading, activePage,
 }) => {
@@ -38,8 +50,11 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
   const [fontSize, setFontSize] = useState(12);
   const [fontFamily, setFontFamily] = useState('Helvetica');
   const [colorHex, setColorHex] = useState('#000000');
+  const [align, setAlign] = useState(0);
   const [searchWord, setSearchWord] = useState('');
   const [replaceWord, setReplaceWord] = useState('');
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [wholeWord, setWholeWord] = useState(false);
 
   useEffect(() => {
     if (selectedBlock) {
@@ -47,6 +62,7 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
       setFontSize(Math.round(selectedBlock.size));
       setFontFamily(selectedBlock.font || 'Helvetica');
       setColorHex(selectedBlock.color || '#000000');
+      setAlign(0);
     }
   }, [selectedBlock]);
 
@@ -90,13 +106,24 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
             <FL t="Typeface" />
             <select className="input-text" value={fontFamily}
               onChange={(e) => setFontFamily(e.target.value)}
+              style={{ marginBottom: '10px', background: 'var(--white)' }}>
+              <option value="Helvetica">Helvetica — Sans-Serif</option>
+              <option value="Helvetica-Bold">Helvetica Bold</option>
+              <option value="Times-Roman">Times Roman — Serif</option>
+              <option value="Times-Bold">Times Bold</option>
+              <option value="Courier">Courier — Monospace</option>
+            </select>
+            <FL t="Alignment" />
+            <select className="input-text" value={align}
+              onChange={(e) => setAlign(Number(e.target.value))}
               style={{ marginBottom: '14px', background: 'var(--white)' }}>
-              <option value="Helvetica">Helvetica - Sans-Serif</option>
-              <option value="Times-Roman">Times Roman - Serif</option>
-              <option value="Courier">Courier - Monospace</option>
+              <option value={0}>Left</option>
+              <option value={1}>Center</option>
+              <option value={2}>Right</option>
+              <option value={3}>Justify</option>
             </select>
             <button className="btn btn-primary" style={{ width: '100%' }}
-              onClick={() => onSaveBlockEdits(textVal, fontSize, fontFamily, colorHex)}
+              onClick={() => onSaveBlockEdits(textVal, fontSize, fontFamily, colorHex, align)}
               disabled={isLoading}>
               {isLoading ? 'Saving...' : 'Apply edits'}
             </button>
@@ -110,9 +137,9 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
             </div>
             {[
               'Double-click any text on the page to edit it',
-              'Hover over text to see selectable regions highlighted',
-              'Scanned pages show an orange OCR button - click it',
-              'Use the command bar in the header for quick replacements',
+              'Use the page toolbar to rotate, duplicate or delete pages',
+              'Scanned pages show an orange OCR button — click it',
+              'Undo / redo any change with Ctrl+Z / Ctrl+Shift+Z',
             ].map((label) => (
               <div key={label} style={{
                 fontSize: '0.82rem', color: 'var(--dark)', fontWeight: 600, lineHeight: 1.4,
@@ -133,17 +160,21 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
             <FL t="Replace with" />
             <input type="text" className="input-text" placeholder="Replacement text..."
               value={replaceWord} onChange={(e) => setReplaceWord(e.target.value)}
-              style={{ marginBottom: '14px' }} />
+              style={{ marginBottom: '12px' }} />
+            <div style={{ display: 'flex', gap: '16px', marginBottom: '14px' }}>
+              <Check label="Match case" checked={caseSensitive} onChange={setCaseSensitive} />
+              <Check label="Whole word" checked={wholeWord} onChange={setWholeWord} />
+            </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
               <button className="btn btn-secondary"
-                onClick={() => onSearchReplace(searchWord, replaceWord, true)}
+                onClick={() => onSearchReplace(searchWord, replaceWord, true, { caseSensitive, wholeWord })}
                 disabled={isLoading || !searchWord.trim()}
                 style={{ fontSize: '0.8rem' }}
                 title={'Replace on page ' + activePage + ' only'}>
                 Page {activePage}
               </button>
               <button className="btn btn-primary"
-                onClick={() => onSearchReplace(searchWord, replaceWord, false)}
+                onClick={() => onSearchReplace(searchWord, replaceWord, false, { caseSensitive, wholeWord })}
                 disabled={isLoading || !searchWord.trim()}
                 style={{ fontSize: '0.8rem' }}>
                 All pages

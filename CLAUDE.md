@@ -8,7 +8,7 @@
 
 **AeroPDF** — a browser-based PDF editor.
 
-- **Backend**: FastAPI + PyMuPDF (Python). Handles PDF parsing, text redaction, text insertion, and file download.
+- **Backend**: FastAPI + PyMuPDF (Python), split into modules — a pure PDF engine, a versioned session manager (undo/redo), an NL command interpreter, and three routers. Handles PDF parsing, background-aware text redaction, text insertion, page operations, and file download.
 - **Frontend**: React + TypeScript + Vite. Renders PDF pages via PDF.js, overlays editable `<div>`s for WYSIWYG editing, runs OCR via Tesseract.js Web Workers.
 
 ---
@@ -37,8 +37,16 @@ pdf-editor/
 ├── README.md               # User-facing setup + deployment docs
 │
 ├── backend/
-│   ├── main.py             # FastAPI app — all HTTP routes
-│   ├── utils.py            # PDF logic — extract, redact, insert text
+│   ├── main.py             # FastAPI app assembly — middleware, lifespan, error handler
+│   ├── config.py           # Settings (env-overridable, prefix AEROPDF_)
+│   ├── logging_config.py   # Structured / JSON logging
+│   ├── schemas.py          # Pydantic request/response models (the API contract)
+│   ├── pdf_engine.py       # Pure PDF logic — extract, redact, insert, page ops
+│   ├── sessions.py         # SessionManager — version stack (undo/redo), locks, persistence
+│   ├── commands.py         # Natural-language command interpreter
+│   ├── deps.py             # Shared singletons + EditResponse builder
+│   ├── routers/            # documents.py · editing.py · pages.py
+│   ├── tests/              # pytest suite (test_engine.py, test_sessions.py)
 │   ├── requirements.txt    # Python deps
 │   └── Dockerfile
 │
@@ -49,11 +57,13 @@ pdf-editor/
     └── src/
         ├── main.tsx
         ├── index.css       # Global styles — DWTD flat theme (see below)
-        ├── App.tsx         # Root component — state, upload, session, toasts
+        ├── api.ts          # Typed API client — one call per endpoint
+        ├── App.tsx         # Root component — state, upload, history, toasts
         └── components/
             ├── PDFCanvas.tsx       # PDF.js render + WYSIWYG overlay + OCR
             ├── Sidebar.tsx         # Page list / thumbnails
             ├── PropertiesPanel.tsx # Block editor + find-and-replace panel
+            ├── PageToolbar.tsx     # Rotate / duplicate / delete / insert page
             └── CommandConsole.tsx  # Header command bar ("replace X with Y")
 ```
 
@@ -77,20 +87,30 @@ PyMuPDF uses top-left origin, same as the browser. No flip needed.
 
 ### Text replacement (backend)
 
-Two modes, both in `backend/utils.py`:
+All PDF mutation lives in `backend/pdf_engine.py` and operates on an **already-open** `fitz.Document` — opening/saving/locking is the SessionManager's job, so a mutation across N pages opens and saves the file exactly **once** (the old code opened+saved per page).
 
-| Mode | Trigger | Backend function | PyMuPDF calls |
+| Mode | Trigger | Engine function | PyMuPDF calls |
 |------|---------|-----------------|---------------|
-| Find & Replace (span-level) | `POST /api/replace` | `replace_text_on_page` | `add_redact_annot` × N → `apply_redactions` once → `insert_text` × N |
-| Block edit | `POST /api/edit-block` | `save_edited_block` | `add_redact_annot` → `apply_redactions` → `insert_textbox` |
+| Find & Replace | `POST /api/replace` | `replace_text` → `replace_on_page` | `add_redact_annot` × N → `apply_redactions` once → `insert_text` × N |
+| Block edit | `POST /api/edit-block` | `edit_block` | `add_redact_annot` → `apply_redactions` → `insert_textbox` (auto-shrink to fit) |
+| Page ops | `POST /api/pages/*` | `rotate_pages` / `delete_pages` / `reorder_pages` / `duplicate_page` / `insert_blank_page` | `set_rotation` / `delete_pages` / `select` / `fullcopy_page` / `new_page` |
 
-**Critical**: `apply_redactions()` must be called **once** after all `add_redact_annot` calls, not inside a per-span loop. Calling it inside the loop corrupts the page content stream.
+Engine guarantees:
+- **Background-aware redaction** — `detect_fill_color()` samples the page so removed text is filled with the real background colour, not hard-coded white.
+- **Accurate baselines** — insertion uses the captured span `origin`, not a `y1 - height*0.15` fudge.
+- **Glyph-safe fonts** — bold/italic/serif/mono are read from span *flags* and mapped to a base-14 font. Re-embedding the original subsetted font is intentionally avoided (subsets lack glyphs for newly-typed chars → blank `.notdef` boxes).
+- **Overflow-safe blocks** — text is measured on a scratch page and the font auto-shrinks; if it still won't fit, a `warnings[]` entry is returned rather than silently clipping.
 
-### Session model
+**Critical**: `apply_redactions()` must be called **once** after all `add_redact_annot` calls, not inside a per-span loop — calling it inside the loop corrupts the page content stream. Redaction passes `images=fitz.PDF_REDACT_IMAGE_NONE` so overlapping images survive.
 
-Each upload creates a UUID session stored in `backend/temp_docs/<session_id>/`. In-memory dict `sessions` maps `session_id → {original_path, current_path}`. All edit endpoints mutate `current_path` in place.
+### Session model & version history
 
-⚠️ Sessions are in-memory — they don't survive a server restart. On Vercel (serverless), sessions reset between invocations; fine for short editing sessions.
+Each upload creates a UUID session under `backend/temp_docs/<session_id>/` with a `versions/` stack (`0000.pdf`, `0001.pdf`, …) and a `manifest.json`. Every mutating edit applies to the current version and writes a **new** snapshot, so:
+- **Undo/redo** is an index move (`POST /api/undo`, `/api/redo`); a fresh edit after an undo forks history (the redo tail is discarded). Depth is capped by `AEROPDF_MAX_HISTORY_VERSIONS` (default 50).
+- **Concurrency** is safe — each session has a `threading.Lock`; PyMuPDF runs in a thread-pool via `run_in_threadpool`.
+- **Durability** — sessions + full history survive a restart (manifest is reloaded on startup). Idle sessions older than `AEROPDF_SESSION_TTL_HOURS` (default 24) are purged hourly.
+
+⚠️ On Vercel (serverless) the default temp dir may be read-only and is ephemeral — set `AEROPDF_TEMP_DIR=/tmp/aeropdf` and expect sessions to reset between cold starts.
 
 ### OCR pipeline
 
@@ -109,24 +129,46 @@ App.tsx
   activePage    → 1-based index of the currently visible page
   selectedBlock → the span the user double-clicked (drives PropertiesPanel)
 
-  upload  → POST /api/upload  → setSession
-  replace → POST /api/replace → setSession (new page tree)
-  edit    → POST /api/edit-block → setSession
-  command → POST /api/command → setSession
-  export  → GET  /api/download (opens new tab)
+  history       → { can_undo, can_redo, version } from the last EditResponse
+
+  upload   → POST /api/upload        → setSession + setHistory
+  replace  → POST /api/replace       → applyEdit (pages + history)
+  edit     → POST /api/edit-block    → applyEdit
+  command  → POST /api/command       → applyEdit
+  pageops  → POST /api/pages/*        → applyEdit
+  undo/redo→ POST /api/undo|redo      → applyEdit
+  export   → GET  /api/download?v=N  → opens new tab
 ```
+
+Every mutating endpoint returns the same `EditResponse` (`pages`, `metadata`,
+`history`, `warnings`), so `App.applyEdit()` folds them back uniformly. All
+calls go through the typed client in `src/api.ts`. The canvas re-fetches on a
+`docVersion` bump (the download URL is otherwise static, so without it the
+rendered image would never refresh after an edit).
 
 ---
 
 ## API reference
 
-| Method | Path | Body | Returns |
-|--------|------|------|---------|
-| POST | `/api/upload` | `multipart/form-data` file | Session object (id, filename, metadata, pages[]) |
-| POST | `/api/replace/{session_id}` | `{search_term, replacement, page_number?}` | `{pages[], replacements_made}` |
-| POST | `/api/edit-block/{session_id}` | `{page_number, original_bbox, new_text, font_size, font_name, hex_color}` | `{pages[]}` |
-| POST | `/api/command/{session_id}` | `{command}` (NL string) | `{pages[], message}` |
-| GET | `/api/download/{session_id}` | — | PDF file |
+All mutating endpoints return an `EditResponse`: `{success, message, pages[], metadata, history, replacements_made?, warnings[]}`.
+
+| Method | Path | Body |
+|--------|------|------|
+| GET | `/api/health` | — |
+| POST | `/api/upload` | `multipart/form-data` file → UploadResponse (adds `session_id`, `filename`) |
+| POST | `/api/replace/{session_id}` | `{search_term, replacement, page_number?, case_sensitive?, whole_word?}` |
+| POST | `/api/edit-block/{session_id}` | `{page_number, original_bbox, new_text, font_size, font_name, hex_color, align?, auto_shrink?}` |
+| POST | `/api/command/{session_id}` | `{command}` (NL string) |
+| POST | `/api/undo/{session_id}` · `/api/redo/{session_id}` | — |
+| POST | `/api/pages/rotate/{session_id}` | `{page_numbers?, degrees}` |
+| POST | `/api/pages/delete/{session_id}` | `{page_numbers[]}` |
+| POST | `/api/pages/reorder/{session_id}` | `{order[]}` (permutation) |
+| POST | `/api/pages/duplicate/{session_id}` | `{page_number}` |
+| POST | `/api/pages/insert-blank/{session_id}` | `{after_page, width?, height?}` |
+| DELETE | `/api/session/{session_id}` | — |
+| GET | `/api/download/{session_id}` | — → PDF file |
+
+**Commands** (`/api/command`): `replace "a" with "b" [on page N]` · `delete page N` (or `2-4`, `1,3`) · `rotate page N left|right|180` · `duplicate page N` · `insert page after page N`.
 
 ---
 
@@ -156,6 +198,10 @@ Font: **Nunito** (Google Fonts, 400–900 weights) — rounded, friendly, playfu
 - **`apply_redactions` loop bug**: Fixed — do NOT call inside a per-span loop. One call after all annotations.
 - **`run.py` shell=True bug**: Fixed — backend now launched with `[sys.executable, "-m", "uvicorn", ...]` without `shell=True`.
 - **Render race condition**: Fixed — `PDFCanvas.tsx` uses per-invocation `cancelled` flag, not stale `rendering` state.
+- **Stale canvas after edits**: Fixed — the download URL is static, so the canvas now re-fetches via a `?v=docVersion` cache-buster keyed on the history version.
+- **PyMuPDF ≥1.27 API drift**: `fitz.TEXT_CASE_INSENSITIVE` was removed (search is case-insensitive by default); case-sensitive replace post-filters with `get_textbox`. `fullcopy_page(pno, to=page_count)` raises — duplicating the last page uses `to=-1`.
+- **Backend tests**: `cd backend && python -m pytest` (17 tests; engine + sessions). No server needed.
+- **Open-doc contract**: engine functions never open/save/close — pass them an open `fitz.Document` from `SessionManager.mutate`, which handles versioning. Don't reintroduce per-call `fitz.open(...).save(...)`.
 
 ---
 
@@ -178,4 +224,17 @@ Set env var on Vercel dashboard → frontend service:
 ```
 VITE_API_BASE=/_/backend/api
 ```
+Also set `AEROPDF_TEMP_DIR=/tmp/aeropdf` (default backend dir is read-only on serverless).
 Or deploy backend separately (Railway / Render) and set `VITE_API_BASE` to that URL.
+
+### Backend configuration (env vars, prefix `AEROPDF_`)
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `AEROPDF_TEMP_DIR` | `backend/temp_docs` | Session storage root |
+| `AEROPDF_MAX_FILE_MB` | `50` | Upload size limit |
+| `AEROPDF_MAX_PAGES` | `2000` | Page-count limit |
+| `AEROPDF_ALLOWED_ORIGINS` | `localhost:5173` | CORS allowlist (`*` for dev) |
+| `AEROPDF_SESSION_TTL_HOURS` | `24` | Idle-session purge age |
+| `AEROPDF_MAX_HISTORY_VERSIONS` | `50` | Undo/redo depth |
+| `AEROPDF_JSON_LOGS` | `false` | Emit JSON logs |

@@ -1,23 +1,24 @@
-import React, { useState, useRef, useCallback } from 'react';
-import { Download, AlertCircle, CheckCircle, X } from 'lucide-react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
+import { Download, AlertCircle, CheckCircle, X, Undo2, Redo2 } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { PDFCanvas } from './components/PDFCanvas';
 import { PropertiesPanel } from './components/PropertiesPanel';
 import { CommandConsole } from './components/CommandConsole';
+import { PageToolbar } from './components/PageToolbar';
+import { api, EditResponse, HistoryState, PDFPage } from './api';
 
-interface PDFPage { number: number; width: number; height: number; blocks: any[]; images: any[]; }
 interface Session {
-  session_id: string; filename: string;
-  metadata: { title: string; author: string; pages: number; };
+  session_id: string;
+  filename: string;
+  metadata: { title: string; author: string; pages: number };
   pages: PDFPage[];
 }
 interface SelectedBlock { pageNumber: number; bbox: number[]; text: string; font: string; size: number; color: string; }
 interface Toast { text: string; type: 'success' | 'error' | 'info' | null; }
 
-const API_BASE = import.meta.env.VITE_API_BASE || '/api';
-
 function App() {
   const [session, setSession] = useState<Session | null>(null);
+  const [history, setHistory] = useState<HistoryState | null>(null);
   const [activePage, setActivePage] = useState<number>(1);
   const [selectedBlock, setSelectedBlock] = useState<SelectedBlock | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -31,6 +32,35 @@ function App() {
     setTimeout(() => setToast({ text: '', type: null }), 4000);
   };
 
+  // Single place to fold an EditResponse back into UI state.
+  const applyEdit = useCallback((data: EditResponse, fallbackMsg?: string) => {
+    setSession((prev) => (prev ? { ...prev, pages: data.pages, metadata: data.metadata } : prev));
+    setHistory(data.history);
+    setSelectedBlock(null);
+    const total = data.metadata.pages;
+    setActivePage((p) => Math.min(Math.max(1, p), total));
+    if (data.warnings && data.warnings.length) {
+      showToast(data.warnings[0], 'info');
+    } else {
+      showToast(data.message || fallbackMsg || 'Done!', 'success');
+    }
+  }, []);
+
+  // Generic guarded runner for mutating calls.
+  const run = useCallback(async (fn: () => Promise<EditResponse>, fallbackMsg?: string) => {
+    if (!session) return;
+    setIsLoading(true);
+    setError(null);
+    try {
+      const data = await fn();
+      applyEdit(data, fallbackMsg);
+    } catch (err: any) {
+      showToast(err.message, 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [session, applyEdit]);
+
   const handleFileUpload = async (file: File) => {
     if (!file.name.toLowerCase().endsWith('.pdf')) {
       setError('Only PDF files are supported.');
@@ -38,23 +68,24 @@ function App() {
     }
     setIsLoading(true);
     setError(null);
-    const formData = new FormData();
-    formData.append('file', file);
     try {
-      const res = await fetch(API_BASE + '/upload', { method: 'POST', body: formData });
-      if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Upload failed.'); }
-      const data: Session = await res.json();
-      setSession(data); setActivePage(1); setSelectedBlock(null);
+      const data = await api.upload(file);
+      setSession({ session_id: data.session_id, filename: data.filename, metadata: data.metadata, pages: data.pages });
+      setHistory(data.history);
+      setActivePage(1);
+      setSelectedBlock(null);
       const p = data.metadata.pages;
-      showToast('"' + file.name + '" loaded -- ' + p + ' page' + (p !== 1 ? 's' : '') + '!', 'success');
-    } catch (err: any) { setError(err.message); }
-    finally { setIsLoading(false); }
+      showToast(`"${file.name}" loaded — ${p} page${p !== 1 ? 's' : ''}!`, 'success');
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files?.[0]) { handleFileUpload(e.target.files[0]); e.target.value = ''; }
   };
-
   const onDragOver = useCallback((e: React.DragEvent) => { e.preventDefault(); setIsDragging(true); }, []);
   const onDragLeave = useCallback((e: React.DragEvent) => { e.preventDefault(); setIsDragging(false); }, []);
   const onDrop = useCallback((e: React.DragEvent) => {
@@ -62,68 +93,64 @@ function App() {
     const f = e.dataTransfer.files?.[0]; if (f) handleFileUpload(f);
   }, []);
 
-  const handleSaveBlockEdits = async (updatedText: string, size: number, font: string, color: string) => {
-    if (!session || !selectedBlock) return;
-    setIsLoading(true); setError(null);
-    try {
-      const res = await fetch(API_BASE + '/edit-block/' + session.session_id, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ page_number: selectedBlock.pageNumber, original_bbox: selectedBlock.bbox,
-          new_text: updatedText, font_size: size, font_name: font, hex_color: color }),
-      });
-      if (!res.ok) throw new Error('Failed to save block.');
-      const data = await res.json();
-      setSession({ ...session, pages: data.pages }); setSelectedBlock(null);
-      showToast('Text block updated!', 'success');
-    } catch (err: any) { setError(err.message); }
-    finally { setIsLoading(false); }
-  };
+  const sid = session?.session_id;
 
-  const handleSearchReplace = async (searchTerm: string, replacement: string, pageOnly: boolean) => {
-    if (!session) return;
-    setIsLoading(true); setError(null);
-    try {
-      const res = await fetch(API_BASE + '/replace/' + session.session_id, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ search_term: searchTerm, replacement,
-          page_number: pageOnly ? activePage : null }),
-      });
-      if (!res.ok) throw new Error('Search/replace failed.');
-      const data = await res.json();
-      setSession({ ...session, pages: data.pages }); setSelectedBlock(null);
-      const n = data.replacements_made;
-      showToast('Replaced ' + n + ' instance' + (n !== 1 ? 's' : '') + ' of "' + searchTerm + '"',
-        n > 0 ? 'success' : 'info');
-    } catch (err: any) { setError(err.message); }
-    finally { setIsLoading(false); }
-  };
+  const handleSaveBlockEdits = (text: string, size: number, font: string, color: string, align: number) =>
+    sid && selectedBlock && run(() => api.editBlock(sid, {
+      page_number: selectedBlock.pageNumber, original_bbox: selectedBlock.bbox,
+      new_text: text, font_size: size, font_name: font, hex_color: color, align,
+    }), 'Text block updated!');
 
-  const handleExecuteCommand = async (cmd: string) => {
-    if (!session) return;
-    setIsLoading(true); setError(null);
-    try {
-      const res = await fetch(API_BASE + '/command/' + session.session_id, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: cmd }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Command failed.');
-      setSession({ ...session, pages: data.pages }); setSelectedBlock(null);
-      showToast(data.message, 'success');
-    } catch (err: any) { showToast(err.message, 'error'); }
-    finally { setIsLoading(false); }
-  };
+  const handleSearchReplace = (search: string, replacement: string, pageOnly: boolean, opts: { caseSensitive: boolean; wholeWord: boolean }) =>
+    sid && run(() => api.replace(sid, {
+      search_term: search, replacement, page_number: pageOnly ? activePage : null,
+      case_sensitive: opts.caseSensitive, whole_word: opts.wholeWord,
+    }));
 
-  const handleExportPDF = () => { if (session) window.open(API_BASE + '/download/' + session.session_id, '_blank'); };
+  const handleExecuteCommand = (cmd: string) => sid && run(() => api.command(sid, cmd));
+  const handleUndo = () => sid && run(() => api.undo(sid), 'Undid last change');
+  const handleRedo = () => sid && run(() => api.redo(sid), 'Redid change');
+
+  const handleRotate = (deg: number) => sid && run(() => api.rotate(sid, activePage, deg));
+  const handleDuplicate = () => sid && run(() => api.duplicate(sid, activePage));
+  const handleInsertBlank = () => sid && run(() => api.insertBlank(sid, activePage));
+  const handleDelete = () => sid && run(() => api.deletePages(sid, [activePage]));
+
+  const handleExportPDF = () => { if (sid) window.open(api.downloadUrl(sid), '_blank'); };
 
   const handleOCRComplete = (pageNum: number, ocrBlocks: any[]) => {
     if (!session) return;
-    setSession({ ...session, pages: session.pages.map((p) =>
-      p.number === pageNum ? { ...p, blocks: [...p.blocks, ...ocrBlocks] } : p) });
-    showToast('OCR complete -- text is now editable!', 'success');
+    setSession({
+      ...session,
+      pages: session.pages.map((p) => (p.number === pageNum ? { ...p, blocks: [...p.blocks, ...ocrBlocks] } : p)),
+    });
+    showToast('OCR complete — text is now editable!', 'success');
   };
 
+  // Keyboard shortcuts: Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z (or Ctrl+Y) redo.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!sid || isLoading) return;
+      const mod = e.ctrlKey || e.metaKey;
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); if (history?.can_undo) handleUndo(); }
+      else if (mod && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
+        e.preventDefault(); if (history?.can_redo) handleRedo();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [sid, isLoading, history]);
+
   const toastBg = toast.type === 'error' ? 'var(--red)' : toast.type === 'success' ? 'var(--green)' : 'var(--dark)';
+  const iconBtn = (disabled: boolean): React.CSSProperties => ({
+    display: 'flex', alignItems: 'center', gap: '5px',
+    background: disabled ? 'transparent' : 'rgba(255,255,255,0.18)',
+    border: 'none', borderRadius: 'var(--r-pill)', padding: '7px 11px',
+    color: disabled ? 'rgba(255,255,255,0.35)' : 'white',
+    cursor: disabled ? 'default' : 'pointer', fontWeight: 800, fontSize: '0.8rem',
+  });
 
   return (
     <div className="app-container">
@@ -134,6 +161,16 @@ function App() {
         </div>
         {session ? (
           <>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              <button style={iconBtn(!history?.can_undo || isLoading)} onClick={handleUndo}
+                disabled={!history?.can_undo || isLoading} title="Undo (Ctrl+Z)">
+                <Undo2 size={15} /> Undo
+              </button>
+              <button style={iconBtn(!history?.can_redo || isLoading)} onClick={handleRedo}
+                disabled={!history?.can_redo || isLoading} title="Redo (Ctrl+Shift+Z)">
+                <Redo2 size={15} /> Redo
+              </button>
+            </div>
             <CommandConsole onExecuteCommand={handleExecuteCommand} isLoading={isLoading} />
             <button className="btn btn-export" onClick={handleExportPDF}>
               <Download size={15} /> Export PDF
@@ -153,7 +190,7 @@ function App() {
               Don't let bad PDFs win.
             </h1>
             <p style={{ color: 'var(--medium)', fontSize: '1rem', maxWidth: '460px', margin: '0 auto', fontWeight: 600 }}>
-              Edit text, run OCR on scanned pages, and export without losing formatting.
+              Edit text, run OCR on scanned pages, reorder pages, and export without losing formatting.
             </p>
           </div>
 
@@ -206,7 +243,7 @@ function App() {
           )}
 
           <div style={{ display: 'flex', gap: '10px', marginTop: '28px', flexWrap: 'wrap', justifyContent: 'center' }}>
-            {['Edit text', 'Find and replace', 'OCR scanned pages', 'Export PDF'].map((label) => (
+            {['Edit text', 'Find and replace', 'OCR scanned pages', 'Reorder pages', 'Undo / redo', 'Export PDF'].map((label) => (
               <div key={label} style={{
                 background: 'var(--white)', border: '2.5px solid var(--border)',
                 borderRadius: 'var(--r-pill)', padding: '7px 16px',
@@ -225,7 +262,7 @@ function App() {
                 position: 'absolute', top: '16px', left: '50%', transform: 'translateX(-50%)', zIndex: 40,
                 background: toastBg, color: 'white', padding: '10px 18px', borderRadius: 'var(--r-pill)',
                 fontSize: '0.85rem', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '8px',
-                boxShadow: '0 4px 16px rgba(0,0,0,0.15)', whiteSpace: 'nowrap',
+                boxShadow: '0 4px 16px rgba(0,0,0,0.15)', maxWidth: '90%',
               }}>
                 {toast.type === 'success' ? <CheckCircle size={15} /> : toast.type === 'error' ? <AlertCircle size={15} /> : null}
                 {toast.text}
@@ -235,8 +272,18 @@ function App() {
                 </button>
               </div>
             )}
+            <PageToolbar
+              activePage={activePage}
+              totalPages={session.pages.length}
+              isLoading={isLoading}
+              onRotate={handleRotate}
+              onDuplicate={handleDuplicate}
+              onDelete={handleDelete}
+              onInsertBlank={handleInsertBlank}
+            />
             <PDFCanvas page={session.pages[activePage - 1]}
-              pdfUrl={API_BASE + '/download/' + session.session_id}
+              pdfUrl={api.downloadUrl(session.session_id)}
+              docVersion={history?.version ?? 0}
               onSelectBlock={setSelectedBlock} onOCRComplete={handleOCRComplete} />
           </main>
           <PropertiesPanel selectedBlock={selectedBlock} onSaveBlockEdits={handleSaveBlockEdits}
