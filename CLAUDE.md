@@ -220,12 +220,16 @@ docker-compose up --build
 
 ### Vercel (frontend + backend together)
 See `vercel.json` — uses Vercel experimental multi-services.
-Set env var on Vercel dashboard → frontend service:
-```
-VITE_API_BASE=/_/backend/api
-```
-Also set `AEROPDF_TEMP_DIR=/tmp/aeropdf` (default backend dir is read-only on serverless).
-Or deploy backend separately (Railway / Render) and set `VITE_API_BASE` to that URL.
+
+**Setup steps:**
+1. Push to GitHub (Vercel auto-detects the `vercel.json` config)
+2. On the Vercel dashboard, set environment variables for the **frontend** service:
+   - `VITE_API_BASE=/_/backend/api`
+3. For the **backend** service, optionally set:
+   - `AEROPDF_TEMP_DIR=/tmp/aeropdf` (default temp dir is ephemeral on Vercel)
+4. Deploy
+
+Alternatively, deploy the backend separately (Railway / Render) and set `VITE_API_BASE` to that backend URL instead of the relative path.
 
 ### Backend configuration (env vars, prefix `AEROPDF_`)
 

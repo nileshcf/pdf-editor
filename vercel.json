@@ -4,10 +4,7 @@
     "frontend": {
       "entrypoint": "frontend",
       "routePrefix": "/",
-      "framework": "vite",
-      "env": {
-        "VITE_API_BASE": "/_/backend/api"
-      }
+      "framework": "vite"
     },
     "backend": {
       "entrypoint": "backend/main.py",
