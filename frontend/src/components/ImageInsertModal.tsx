@@ -11,61 +11,54 @@ export const ImageInsertModal: React.FC<ImageInsertModalProps> = ({ onClose, onI
   const [file, setFile] = useState<File | null>(null);
   const [x, setX] = useState(100);
   const [y, setY] = useState(100);
-  const [w, setW] = useState(200);
-  const [h, setH] = useState(200);
+  const [w, setW] = useState(220);
+  const [h, setH] = useState(180);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (file && !isLoading) {
-      onInsert(file, x, y, w, h);
-    }
+    if (!file || isLoading) return;
+    onInsert(file, x, y, w, h);
   };
 
   return (
-    <div style={{
-      position: 'fixed', inset: 0, zIndex: 100, background: 'rgba(0,0,0,0.5)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center'
-    }}>
-      <div style={{
-        background: 'var(--white)', padding: '24px', borderRadius: 'var(--r-md)',
-        width: '400px', maxWidth: '90%', border: '3px solid var(--border)'
-      }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}>
-          <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <ImageIcon size={20} /> Insert Image
+    <div className="modal-backdrop">
+      <div className="modal-panel">
+        <div className="modal-header">
+          <h3>
+            <ImageIcon size={16} strokeWidth={1.5} />
+            <span>Insert Image</span>
           </h3>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer' }}>
-            <X size={20} />
+          <button onClick={onClose} className="modal-close-btn">
+            <X size={14} />
           </button>
         </div>
-        
-        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          <div>
-            <label style={{ fontSize: '0.8rem', fontWeight: 800 }}>Image File</label>
-            <input type="file" accept="image/*" onChange={(e) => setFile(e.target.files?.[0] || null)}
-              style={{ width: '100%', marginTop: '4px' }} required />
+
+        <form onSubmit={handleSubmit} className="modal-form">
+          <label className="modal-label">
+            File
+            <input type="file" accept="image/*" onChange={(e) => setFile(e.target.files?.[0] || null)} required />
+          </label>
+
+          <div className="modal-grid">
+            <label className="modal-label">
+              X
+              <input type="number" className="prop-input" value={x} onChange={(e) => setX(Number(e.target.value))} required />
+            </label>
+            <label className="modal-label">
+              Y
+              <input type="number" className="prop-input" value={y} onChange={(e) => setY(Number(e.target.value))} required />
+            </label>
+            <label className="modal-label">
+              Width
+              <input type="number" className="prop-input" value={w} onChange={(e) => setW(Number(e.target.value))} required />
+            </label>
+            <label className="modal-label">
+              Height
+              <input type="number" className="prop-input" value={h} onChange={(e) => setH(Number(e.target.value))} required />
+            </label>
           </div>
-          
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-            <div>
-              <label style={{ fontSize: '0.8rem', fontWeight: 800 }}>X Position</label>
-              <input type="number" className="input-text" value={x} onChange={(e) => setX(Number(e.target.value))} required />
-            </div>
-            <div>
-              <label style={{ fontSize: '0.8rem', fontWeight: 800 }}>Y Position</label>
-              <input type="number" className="input-text" value={y} onChange={(e) => setY(Number(e.target.value))} required />
-            </div>
-            <div>
-              <label style={{ fontSize: '0.8rem', fontWeight: 800 }}>Width</label>
-              <input type="number" className="input-text" value={w} onChange={(e) => setW(Number(e.target.value))} required />
-            </div>
-            <div>
-              <label style={{ fontSize: '0.8rem', fontWeight: 800 }}>Height</label>
-              <input type="number" className="input-text" value={h} onChange={(e) => setH(Number(e.target.value))} required />
-            </div>
-          </div>
-          
-          <button type="submit" className="btn btn-primary" disabled={!file || isLoading} style={{ marginTop: '12px' }}>
+
+          <button type="submit" className="download-btn" disabled={!file || isLoading}>
             {isLoading ? 'Inserting...' : 'Insert Image'}
           </button>
         </form>

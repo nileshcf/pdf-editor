@@ -1,13 +1,29 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { Download, AlertCircle, CheckCircle, X, Undo2, Redo2 } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  AlertCircle,
+  CheckCircle2,
+  ChevronDown,
+  Download,
+  FolderOpen,
+  Image,
+  MessageSquare,
+  MousePointer2,
+  PenTool,
+  Pencil,
+  Redo2,
+  Share2,
+  Type,
+  Undo2,
+  User,
+  X,
+} from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { PDFCanvas } from './components/PDFCanvas';
 import { PropertiesPanel } from './components/PropertiesPanel';
-import { CommandConsole } from './components/CommandConsole';
-import { PageToolbar } from './components/PageToolbar';
 import { ImageInsertModal } from './components/ImageInsertModal';
-import { ShapeToolbar, ShapeType } from './components/ShapeToolbar';
 import { api, EditResponse, HistoryState, OCRBlockPayload, PDFPage } from './api';
+
+type ToolKey = 'cursor' | 'text' | 'image' | 'draw' | 'signature' | 'comment';
 
 interface Session {
   session_id: string;
@@ -15,8 +31,38 @@ interface Session {
   metadata: { title: string; author: string; pages: number };
   pages: PDFPage[];
 }
-interface SelectedBlock { pageNumber: number; bbox: number[]; text: string; font: string; size: number; color: string; flags?: number; }
-interface Toast { text: string; type: 'success' | 'error' | 'info' | null; }
+
+interface SelectedBlock {
+  pageNumber: number;
+  bbox: number[];
+  text: string;
+  font: string;
+  size: number;
+  color: string;
+  flags?: number;
+}
+
+interface Toast {
+  text: string;
+  type: 'success' | 'error' | 'info' | null;
+}
+
+const MOCK_PAGES: PDFPage[] = [1, 2, 3, 4].map((n) => ({
+  number: n,
+  width: 595,
+  height: 842,
+  blocks: [],
+  images: [],
+}));
+
+const TOOL_LIST: Array<{ key: ToolKey; icon: React.ReactNode; label: string }> = [
+  { key: 'cursor', icon: <MousePointer2 size={18} strokeWidth={1.5} />, label: 'Cursor (V)' },
+  { key: 'text', icon: <Type size={18} strokeWidth={1.5} />, label: 'Text Tool (T)' },
+  { key: 'image', icon: <Image size={18} strokeWidth={1.5} />, label: 'Image Tool' },
+  { key: 'draw', icon: <PenTool size={18} strokeWidth={1.5} />, label: 'Draw Tool' },
+  { key: 'signature', icon: <Pencil size={18} strokeWidth={1.5} />, label: 'Signature Pen' },
+  { key: 'comment', icon: <MessageSquare size={18} strokeWidth={1.5} />, label: 'Comment' },
+];
 
 function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -24,160 +70,148 @@ function App() {
   const [activePage, setActivePage] = useState<number>(1);
   const [selectedBlock, setSelectedBlock] = useState<SelectedBlock | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<Toast>({ text: '', type: null });
+  const [activeTool, setActiveTool] = useState<ToolKey>('text');
+  const [showImageModal, setShowImageModal] = useState(false);
+  const [activeShape, setActiveShape] = useState<'rect' | 'circle' | 'line' | 'arrow' | null>(null);
+  const [strokeColor, setStrokeColor] = useState('#000000');
+  const [fillColor, setFillColor] = useState('#ffffff');
+  const [lineWidth, setLineWidth] = useState(2);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [showImageModal, setShowImageModal] = useState(false);
-  const [activeShape, setActiveShape] = useState<ShapeType | null>(null);
-  const [strokeColor, setStrokeColor] = useState('#00bcd4');
-  const [fillColor, setFillColor] = useState('');
-  const [lineWidth, setLineWidth] = useState(2);
-
-  const [sidebarWidth, setSidebarWidth] = useState(() => parseInt(localStorage.getItem('sidebarWidth') || '240'));
-  const [propertiesWidth, setPropertiesWidth] = useState(() => parseInt(localStorage.getItem('propertiesWidth') || '290'));
-
-  const startSidebarResize = useCallback((e: React.PointerEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startWidth = sidebarWidth;
-
-    const onPointerMove = (moveEvent: PointerEvent) => {
-      const newWidth = Math.min(Math.max(140, startWidth + (moveEvent.clientX - startX)), 400);
-      setSidebarWidth(newWidth);
-    };
-
-    const onPointerUp = () => {
-      document.removeEventListener('pointermove', onPointerMove);
-      document.removeEventListener('pointerup', onPointerUp);
-      setSidebarWidth((currentWidth) => {
-        localStorage.setItem('sidebarWidth', currentWidth.toString());
-        return currentWidth;
-      });
-    };
-
-    document.addEventListener('pointermove', onPointerMove);
-    document.addEventListener('pointerup', onPointerUp);
-  }, [sidebarWidth]);
-
-  const startPropertiesResize = useCallback((e: React.PointerEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startWidth = propertiesWidth;
-
-    const onPointerMove = (moveEvent: PointerEvent) => {
-      const newWidth = Math.min(Math.max(200, startWidth - (moveEvent.clientX - startX)), 500);
-      setPropertiesWidth(newWidth);
-    };
-
-    const onPointerUp = () => {
-      document.removeEventListener('pointermove', onPointerMove);
-      document.removeEventListener('pointerup', onPointerUp);
-      setPropertiesWidth((currentWidth) => {
-        localStorage.setItem('propertiesWidth', currentWidth.toString());
-        return currentWidth;
-      });
-    };
-
-    document.addEventListener('pointermove', onPointerMove);
-    document.addEventListener('pointerup', onPointerUp);
-  }, [propertiesWidth]);
-
-  const showToast = (text: string, type: Toast['type']) => {
+  const showToast = useCallback((text: string, type: Toast['type']) => {
     setToast({ text, type });
-    setTimeout(() => setToast({ text: '', type: null }), 4000);
-  };
-
-  // Single place to fold an EditResponse back into UI state.
-  const applyEdit = useCallback((data: EditResponse, fallbackMsg?: string) => {
-    setSession((prev) => (prev ? { ...prev, pages: data.pages, metadata: data.metadata } : prev));
-    setHistory(data.history);
-    setSelectedBlock(null);
-    const total = data.metadata.pages;
-    setActivePage((p) => Math.min(Math.max(1, p), total));
-    if (data.warnings && data.warnings.length) {
-      showToast(data.warnings[0], 'info');
-    } else {
-      showToast(data.message || fallbackMsg || 'Done!', 'success');
-    }
+    setTimeout(() => setToast({ text: '', type: null }), 3500);
   }, []);
 
-  // Generic guarded runner for mutating calls.
-  const run = useCallback(async (fn: () => Promise<EditResponse>, fallbackMsg?: string) => {
-    if (!session) return;
-    setIsLoading(true);
-    setError(null);
-    try {
-      const data = await fn();
-      applyEdit(data, fallbackMsg);
-    } catch (err: any) {
-      showToast(err.message, 'error');
-    } finally {
-      setIsLoading(false);
-    }
-  }, [session, applyEdit]);
+  const displayPages = session?.pages ?? MOCK_PAGES;
+  const displayedFilename = session?.filename || 'annual_report_draft.pdf';
+  const sid = session?.session_id;
+
+  useEffect(() => {
+    const maxPage = displayPages.length;
+    setActivePage((current) => Math.min(Math.max(1, current), maxPage));
+  }, [displayPages.length]);
+
+  const applyEdit = useCallback(
+    (data: EditResponse, fallbackMsg?: string) => {
+      setSession((prev) => (prev ? { ...prev, pages: data.pages, metadata: data.metadata } : prev));
+      setHistory(data.history);
+      setSelectedBlock(null);
+      const total = data.metadata.pages;
+      setActivePage((p) => Math.min(Math.max(1, p), total));
+      if (data.warnings?.length) {
+        showToast(data.warnings[0], 'info');
+      } else {
+        showToast(data.message || fallbackMsg || 'Done', 'success');
+      }
+    },
+    [showToast]
+  );
+
+  const run = useCallback(
+    async (fn: () => Promise<EditResponse>, fallbackMsg?: string) => {
+      if (!session) return;
+      setIsLoading(true);
+      try {
+        const data = await fn();
+        applyEdit(data, fallbackMsg);
+      } catch (err: any) {
+        showToast(err.message || 'Request failed', 'error');
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [session, applyEdit, showToast]
+  );
 
   const handleFileUpload = async (file: File) => {
     if (!file.name.toLowerCase().endsWith('.pdf')) {
-      setError('Only PDF files are supported.');
+      showToast('Only PDF files are supported.', 'error');
       return;
     }
     setIsLoading(true);
-    setError(null);
     try {
       const data = await api.upload(file);
-      setSession({ session_id: data.session_id, filename: data.filename, metadata: data.metadata, pages: data.pages });
+      setSession({
+        session_id: data.session_id,
+        filename: data.filename,
+        metadata: data.metadata,
+        pages: data.pages,
+      });
       setHistory(data.history);
       setActivePage(1);
       setSelectedBlock(null);
-      const p = data.metadata.pages;
-      showToast(`"${file.name}" loaded — ${p} page${p !== 1 ? 's' : ''}!`, 'success');
+      showToast(`${data.filename} loaded`, 'success');
     } catch (err: any) {
-      setError(err.message);
+      showToast(err.message || 'Upload failed', 'error');
     } finally {
       setIsLoading(false);
     }
   };
 
-  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files?.[0]) { handleFileUpload(e.target.files[0]); e.target.value = ''; }
-  };
-  const onDragOver = useCallback((e: React.DragEvent) => { e.preventDefault(); setIsDragging(true); }, []);
-  const onDragLeave = useCallback((e: React.DragEvent) => { e.preventDefault(); setIsDragging(false); }, []);
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault(); setIsDragging(false);
-    const f = e.dataTransfer.files?.[0]; if (f) handleFileUpload(f);
-  }, []);
+  const openFilePicker = () => fileInputRef.current?.click();
 
-  const sid = session?.session_id;
+  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files?.[0]) {
+      handleFileUpload(e.target.files[0]);
+      e.target.value = '';
+    }
+  };
+
+  const onDragOver = useCallback((e: React.DragEvent) => {
+    if (session) return;
+    e.preventDefault();
+    setIsDragging(true);
+  }, [session]);
+
+  const onDragLeave = useCallback((e: React.DragEvent) => {
+    if (session) return;
+    e.preventDefault();
+    setIsDragging(false);
+  }, [session]);
+
+  const onDrop = useCallback((e: React.DragEvent) => {
+    if (session) return;
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) handleFileUpload(file);
+  }, [session]);
 
   const handleSaveBlockEdits = (text: string, size: number, font: string, color: string, align: number) =>
-    sid && selectedBlock && run(() => api.editBlock(sid, {
-      page_number: selectedBlock.pageNumber, original_bbox: selectedBlock.bbox,
-      new_text: text, font_size: size, font_name: font, hex_color: color, align,
-    }), 'Text block updated!');
+    sid &&
+    selectedBlock &&
+    run(
+      () =>
+        api.editBlock(sid, {
+          page_number: selectedBlock.pageNumber,
+          original_bbox: selectedBlock.bbox,
+          new_text: text,
+          font_size: size,
+          font_name: font,
+          hex_color: color,
+          align,
+        }),
+      'Text updated'
+    );
 
-  const handleSearchReplace = (search: string, replacement: string, pageOnly: boolean, opts: { caseSensitive: boolean; wholeWord: boolean }) =>
-    sid && run(() => api.replace(sid, {
-      search_term: search, replacement, page_number: pageOnly ? activePage : null,
-      case_sensitive: opts.caseSensitive, whole_word: opts.wholeWord,
-    }));
-
-  const handleExecuteCommand = (cmd: string) => sid && run(() => api.command(sid, cmd));
-  const handleUndo = () => sid && run(() => api.undo(sid), 'Undid last change');
+  const handleUndo = () => sid && run(() => api.undo(sid), 'Undid change');
   const handleRedo = () => sid && run(() => api.redo(sid), 'Redid change');
-
-  const handleRotate = (deg: number) => sid && run(() => api.rotate(sid, activePage, deg));
-  const handleDuplicate = () => sid && run(() => api.duplicate(sid, activePage));
-  const handleInsertBlank = () => sid && run(() => api.insertBlank(sid, activePage));
+  const handleRotate = (deg: number) => sid && run(() => api.rotate(sid, activePage, deg), 'Page rotated');
+  const handleDuplicate = () => sid && run(() => api.duplicate(sid, activePage), 'Page duplicated');
+  const handleInsertBlank = () => sid && run(() => api.insertBlank(sid, activePage), 'Blank page inserted');
   const handleDelete = () => {
     if (!sid) return;
     if (!window.confirm(`Delete page ${activePage}? This action can be undone.`)) return;
-    run(() => api.deletePages(sid, [activePage]));
+    run(() => api.deletePages(sid, [activePage]), 'Page deleted');
   };
 
-  const handleExportPDF = () => { if (sid) window.open(api.downloadUrl(sid), '_blank'); };
+  const handleExportPDF = () => {
+    if (!sid) return;
+    window.open(api.downloadUrl(sid), '_blank');
+  };
 
   const handleOCRComplete = async (pageNum: number, ocrBlocks: OCRBlockPayload[]) => {
     if (!sid) return;
@@ -188,9 +222,9 @@ function App() {
     setIsLoading(true);
     try {
       const data = await api.persistOcr(sid, { page_number: pageNum, blocks: ocrBlocks });
-      applyEdit(data, `OCR text saved on page ${pageNum}.`);
+      applyEdit(data, `OCR text saved on page ${pageNum}`);
     } catch (err: any) {
-      showToast(err.message, 'error');
+      showToast(err.message || 'OCR save failed', 'error');
     } finally {
       setIsLoading(false);
     }
@@ -201,10 +235,11 @@ function App() {
     setIsLoading(true);
     try {
       const data = await api.addImage(sid, file, x, y, w, h, activePage);
-      applyEdit(data, 'Image inserted!');
+      applyEdit(data, 'Image inserted');
       setShowImageModal(false);
+      setActiveTool('cursor');
     } catch (err: any) {
-      showToast(err.message, 'error');
+      showToast(err.message || 'Image insert failed', 'error');
     } finally {
       setIsLoading(false);
     }
@@ -222,201 +257,158 @@ function App() {
         fill_color: fillColor || undefined,
         line_width: lineWidth,
       });
-      applyEdit(data, 'Shape added!');
+      applyEdit(data, 'Shape added');
       setActiveShape(null);
+      setActiveTool('cursor');
     } catch (err: any) {
-      showToast(err.message, 'error');
+      showToast(err.message || 'Shape draw failed', 'error');
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Keyboard shortcuts: Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z (or Ctrl+Y) redo.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!sid || isLoading) return;
-      const mod = e.ctrlKey || e.metaKey;
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); if (history?.can_undo) handleUndo(); }
-      else if (mod && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
-        e.preventDefault(); if (history?.can_redo) handleRedo();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [sid, isLoading, history]);
+  const onToolSelect = (tool: ToolKey) => {
+    setActiveTool(tool);
+    if (tool !== 'draw') setActiveShape(null);
+    if (tool === 'draw') setActiveShape((prev) => prev || 'rect');
+    if (tool === 'image' && session) setShowImageModal(true);
+  };
 
-  const toastBg = toast.type === 'error' ? 'var(--red)' : toast.type === 'success' ? 'var(--green)' : 'var(--dark)';
-  const iconBtn = (disabled: boolean): React.CSSProperties => ({
-    display: 'flex', alignItems: 'center', gap: '5px',
-    background: disabled ? 'transparent' : 'rgba(255,255,255,0.18)',
-    border: 'none', borderRadius: 'var(--r-pill)', padding: '7px 11px',
-    color: disabled ? 'rgba(255,255,255,0.35)' : 'white',
-    cursor: disabled ? 'default' : 'pointer', fontWeight: 800, fontSize: '0.8rem',
-  });
+  const activePageData = displayPages[Math.max(0, activePage - 1)];
 
   return (
-    <div className="app-container">
-      <header className="header">
-        <div className="app-logo">
-          <span style={{ fontSize: '1.5rem', lineHeight: 1 }}>PDF</span>
-          <span>AeroPDF</span>
-        </div>
-        {session ? (
-          <>
-            <div style={{ display: 'flex', gap: '4px' }}>
-              <button style={iconBtn(!history?.can_undo || isLoading)} onClick={handleUndo}
-                disabled={!history?.can_undo || isLoading} title="Undo (Ctrl+Z)">
-                <Undo2 size={15} /> Undo
-              </button>
-              <button style={iconBtn(!history?.can_redo || isLoading)} onClick={handleRedo}
-                disabled={!history?.can_redo || isLoading} title="Redo (Ctrl+Shift+Z)">
-                <Redo2 size={15} /> Redo
-              </button>
-            </div>
-            <CommandConsole onExecuteCommand={handleExecuteCommand} isLoading={isLoading} />
-            <button className="btn btn-export" onClick={handleExportPDF}>
-              <Download size={15} /> Export PDF
+    <div className="app-shell">
+      <header className="top-toolbar">
+        <div className="toolbar-left">
+          <button className="tool-btn" title="Menu">
+            <ChevronDown size={18} strokeWidth={1.5} />
+          </button>
+          {TOOL_LIST.map((tool) => (
+            <button
+              key={tool.key}
+              className={`tool-btn${activeTool === tool.key ? ' active' : ''}`}
+              title={tool.label}
+              onClick={() => onToolSelect(tool.key)}
+              disabled={!session && tool.key !== 'text' && tool.key !== 'cursor'}
+            >
+              {tool.icon}
             </button>
-          </>
-        ) : (
-          <span style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.88rem', fontWeight: 700 }}>
-            Upload a PDF to get started
-          </span>
-        )}
+          ))}
+        </div>
+
+        <div className="toolbar-center">
+          <span className="doc-title">{displayedFilename}</span>
+        </div>
+
+        <div className="toolbar-right">
+          {!session && (
+            <button className="icon-action" title="Open PDF" onClick={openFilePicker}>
+              <FolderOpen size={16} strokeWidth={1.5} />
+            </button>
+          )}
+          <button className="icon-action" title="Undo" onClick={handleUndo} disabled={!history?.can_undo || isLoading}>
+            <Undo2 size={16} strokeWidth={1.5} />
+          </button>
+          <button className="icon-action" title="Redo" onClick={handleRedo} disabled={!history?.can_redo || isLoading}>
+            <Redo2 size={16} strokeWidth={1.5} />
+          </button>
+          <button className="share-btn" disabled={!session}>
+            <Share2 size={15} strokeWidth={1.5} />
+            <span>Share</span>
+          </button>
+          <button className="export-btn" onClick={handleExportPDF} disabled={!session}>
+            <Download size={15} strokeWidth={1.5} />
+            <span>Export PDF</span>
+          </button>
+          <button className="avatar-btn" title="User">
+            <User size={16} strokeWidth={1.5} />
+          </button>
+        </div>
       </header>
 
-      {!session ? (
-        <div className="upload-overlay fade-in">
-          <div style={{ textAlign: 'center', marginBottom: '28px' }}>
-            <h1 style={{ fontSize: '2.2rem', fontWeight: 900, color: 'var(--red)', margin: '0 0 10px 0', letterSpacing: '-0.5px' }}>
-              Don't let bad PDFs win.
-            </h1>
-            <p style={{ color: 'var(--medium)', fontSize: '1rem', maxWidth: '460px', margin: '0 auto', fontWeight: 600 }}>
-              Edit text, run OCR on scanned pages, reorder pages, and export without losing formatting.
-            </p>
-          </div>
+      <div className="editor-shell">
+        <Sidebar
+          pages={displayPages}
+          activePage={activePage}
+          filename={displayedFilename}
+          pdfUrl={session ? api.downloadUrl(session.session_id) : undefined}
+          docVersion={history?.version ?? 0}
+          setActivePage={setActivePage}
+        />
 
-          <div
-            className={'dropzone' + (isDragging ? ' drag-active' : '')}
-            onClick={() => fileInputRef.current?.click()}
-            onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}
-            role="button" tabIndex={0}
-            onKeyDown={(e) => e.key === 'Enter' && fileInputRef.current?.click()}
-          >
-            {isLoading ? (
-              <p style={{ fontWeight: 800, fontSize: '1.05rem', color: 'var(--teal)' }}>Parsing PDF...</p>
-            ) : (
-              <>
-                <div style={{
-                  width: 72, height: 72,
-                  background: isDragging ? 'var(--teal)' : 'var(--bg)',
-                  border: '3px solid ' + (isDragging ? 'var(--teal-dark)' : 'var(--border)'),
-                  borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  marginBottom: '16px', transition: 'all 0.2s',
-                }}>
-                  <Download size={28} style={{ color: isDragging ? 'white' : 'var(--teal)', transform: 'rotate(180deg)' }} />
-                </div>
-                <h3 style={{ margin: '0 0 6px 0', fontSize: '1.1rem', fontWeight: 800 }}>
-                  {isDragging ? 'Drop your PDF here!' : 'Drag and drop your PDF here'}
-                </h3>
-                <p style={{ color: 'var(--medium)', fontSize: '0.85rem', margin: '0 0 20px 0', fontWeight: 600 }}>
-                  or click to browse files
-                </p>
-                <button className="btn btn-primary" style={{ pointerEvents: 'none' }}>Browse PDF</button>
-              </>
-            )}
-            <input type="file" ref={fileInputRef} onChange={onFileChange} accept="application/pdf" style={{ display: 'none' }} />
-          </div>
-
-          {error && (
-            <div style={{
-              display: 'flex', alignItems: 'center', gap: '10px', marginTop: '20px',
-              background: 'rgba(255,59,47,0.08)', border: '2px solid rgba(255,59,47,0.3)',
-              padding: '12px 18px', borderRadius: 'var(--r-md)', color: 'var(--red)',
-              maxWidth: '540px', width: '100%',
-            }}>
-              <AlertCircle size={18} style={{ flexShrink: 0 }} />
-              <span style={{ fontSize: '0.88rem', fontWeight: 700 }}>{error}</span>
-              <button onClick={() => setError(null)}
-                style={{ background: 'none', border: 'none', cursor: 'pointer', marginLeft: 'auto', color: 'var(--red)' }}>
-                <X size={16} />
+        <main className={`editor-stage${isDragging ? ' dragging' : ''}`} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
+          {toast.text && (
+            <div className={`toast${toast.type ? ` ${toast.type}` : ''}`}>
+              {toast.type === 'success' ? <CheckCircle2 size={14} /> : null}
+              {toast.type === 'error' ? <AlertCircle size={14} /> : null}
+              <span>{toast.text}</span>
+              <button onClick={() => setToast({ text: '', type: null })} className="toast-close">
+                <X size={12} />
               </button>
             </div>
           )}
 
-          <div style={{ display: 'flex', gap: '10px', marginTop: '28px', flexWrap: 'wrap', justifyContent: 'center' }}>
-            {['Edit text', 'Find and replace', 'OCR scanned pages', 'Reorder pages', 'Undo / redo', 'Export PDF'].map((label) => (
-              <div key={label} style={{
-                background: 'var(--white)', border: '2.5px solid var(--border)',
-                borderRadius: 'var(--r-pill)', padding: '7px 16px',
-                fontSize: '0.82rem', fontWeight: 800, color: 'var(--dark)',
-              }}>{label}</div>
-            ))}
-          </div>
-        </div>
-      ) : (
-        <div className="workspace-layout" style={{
-          '--sidebar-width': `${sidebarWidth}px`,
-          '--properties-width': `${propertiesWidth}px`
-        } as React.CSSProperties}>
-          <Sidebar pages={session.pages} activePage={activePage} filename={session.filename}
-            pdfUrl={api.downloadUrl(session.session_id)} docVersion={history?.version ?? 0}
-            setActivePage={(n) => { setActivePage(n); setSelectedBlock(null); }} />
-          <div className="resize-handle" onPointerDown={startSidebarResize} onDoubleClick={() => { setSidebarWidth(240); localStorage.setItem('sidebarWidth', '240'); }} />
-          <main className="canvas-viewport">
-            {toast.text && (
-              <div className="fade-in" style={{
-                position: 'absolute', top: '16px', left: '50%', transform: 'translateX(-50%)', zIndex: 40,
-                background: toastBg, color: 'white', padding: '10px 18px', borderRadius: 'var(--r-pill)',
-                fontSize: '0.85rem', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '8px',
-                boxShadow: '0 4px 16px rgba(0,0,0,0.15)', maxWidth: '90%',
-              }}>
-                {toast.type === 'success' ? <CheckCircle size={15} /> : toast.type === 'error' ? <AlertCircle size={15} /> : null}
-                {toast.text}
-                <button onClick={() => setToast({ text: '', type: null })}
-                  style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.8)', cursor: 'pointer', padding: '0 0 0 4px' }}>
-                  <X size={14} />
-                </button>
-              </div>
-            )}
-            <PageToolbar
-              activePage={activePage}
-              totalPages={session.pages.length}
-              isLoading={isLoading}
-              onRotate={handleRotate}
-              onDuplicate={handleDuplicate}
-              onDelete={handleDelete}
-              onInsertBlank={handleInsertBlank}
-            />
-            <PDFCanvas page={session.pages[activePage - 1]}
+          {session ? (
+            <PDFCanvas
+              page={activePageData}
               pdfUrl={api.downloadUrl(session.session_id)}
               docVersion={history?.version ?? 0}
               onSelectBlock={setSelectedBlock}
               onOCRComplete={handleOCRComplete}
               selectedBlock={selectedBlock}
-              activeShape={activeShape} onDrawShape={handleDrawShape} />
-            {activeShape && (
-              <ShapeToolbar
-                activeShape={activeShape} onSelectShape={setActiveShape}
-                strokeColor={strokeColor} onChangeStrokeColor={setStrokeColor}
-                fillColor={fillColor} onChangeFillColor={setFillColor}
-                lineWidth={lineWidth} onChangeLineWidth={setLineWidth}
-              />
-            )}
-          </main>
-          <div className="resize-handle" onPointerDown={startPropertiesResize} onDoubleClick={() => { setPropertiesWidth(290); localStorage.setItem('propertiesWidth', '290'); }} />
-          <PropertiesPanel selectedBlock={selectedBlock} onSaveBlockEdits={handleSaveBlockEdits}
-            onSearchReplace={handleSearchReplace} 
-            onInsertImage={() => setShowImageModal(true)}
-            onToggleDraw={() => setActiveShape(activeShape ? null : 'rect')}
-            isDrawing={!!activeShape}
-            isLoading={isLoading} activePage={activePage} />
-        </div>
-      )}
+              activeShape={activeTool === 'draw' ? activeShape : null}
+              onDrawShape={handleDrawShape}
+            />
+          ) : (
+            <button className="mock-document" onClick={openFilePicker}>
+              <div className="mock-title">Quarterly Revenue Summary</div>
+              <div className="mock-paragraph">
+                This placeholder document mirrors the active editing surface. Open a PDF to start editing live text, images, and annotations.
+              </div>
+              <div className="mock-image" />
+              <div className="mock-selection">
+                <span>Executive overview selected</span>
+                {Array.from({ length: 8 }).map((_, i) => (
+                  <b key={i} className={`mock-handle h-${i + 1}`} />
+                ))}
+              </div>
+            </button>
+          )}
+        </main>
 
-      {showImageModal && (
+        <PropertiesPanel
+          selectedBlock={selectedBlock}
+          activeTool={activeTool}
+          isLoading={isLoading}
+          activePage={activePage}
+          onSaveBlockEdits={handleSaveBlockEdits}
+          onInsertImage={() => setShowImageModal(true)}
+          onToggleDraw={() => onToolSelect(activeTool === 'draw' ? 'cursor' : 'draw')}
+          isDrawing={activeTool === 'draw'}
+          onExport={handleExportPDF}
+          onRotate={handleRotate}
+          onDuplicate={handleDuplicate}
+          onDelete={handleDelete}
+          onInsertBlank={handleInsertBlank}
+          strokeColor={strokeColor}
+          onChangeStrokeColor={setStrokeColor}
+          fillColor={fillColor}
+          onChangeFillColor={setFillColor}
+          lineWidth={lineWidth}
+          onChangeLineWidth={setLineWidth}
+          canEdit={!!session}
+        />
+      </div>
+
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={onFileChange}
+        accept="application/pdf"
+        style={{ display: 'none' }}
+      />
+
+      {showImageModal && session && (
         <ImageInsertModal
           onClose={() => setShowImageModal(false)}
           onInsert={handleInsertImage}

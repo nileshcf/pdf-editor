@@ -224,19 +224,13 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
 
   return (
     <div
-      className="pdf-page-container fade-in"
+      className="pdf-page-container"
       style={{ width: page.width * SCALE, height: page.height * SCALE }}
     >
       {/* Rendering spinner */}
       {rendering && (
-        <div style={{
-          position: 'absolute', inset: 0, zIndex: 25,
-          display: 'flex', flexDirection: 'column',
-          alignItems: 'center', justifyContent: 'center', gap: '10px',
-          background: 'rgba(248,244,238,0.85)',
-          borderRadius: 'calc(var(--r-sm) - 3px)',
-        }}>
-          <span style={{ fontWeight: 800, color: 'var(--medium)', fontSize: '0.9rem' }}>
+        <div className="rendering-overlay">
+          <span className="rendering-label">
             Rendering page {page.number}...
           </span>
         </div>
@@ -245,13 +239,13 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
       {/* OCR progress overlay */}
       {ocrRunning && (
         <div className="ocr-progress-overlay">
-          <span style={{ fontWeight: 800, fontSize: '0.95rem', color: 'var(--dark)' }}>
+          <span className="ocr-status-label">
             {ocrStatus}
           </span>
           <div className="progress-bar-container">
             <div className="progress-bar-fill" style={{ width: `${ocrProgress}%` }} />
           </div>
-          <span style={{ fontSize: '0.78rem', color: 'var(--medium)', fontWeight: 700 }}>
+          <span className="ocr-percent-label">
             {ocrProgress}% complete
           </span>
         </div>
@@ -269,28 +263,36 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
         onPointerUp={activeShape ? handlePointerUp : undefined}
       >
         {isDrawing && startPoint && currentPoint && (
-          <div style={{
-            position: 'absolute',
-            left: Math.min(startPoint.x, currentPoint.x),
-            top: Math.min(startPoint.y, currentPoint.y),
-            width: Math.abs(currentPoint.x - startPoint.x),
-            height: Math.abs(currentPoint.y - startPoint.y),
-            border: activeShape === 'line' || activeShape === 'arrow' ? 'none' : '2px solid var(--teal)',
-            background: activeShape === 'line' || activeShape === 'arrow' ? 'none' : 'rgba(0,188,212,0.2)',
-            pointerEvents: 'none', zIndex: 50
-          }}>
+          <div
+            className={`draw-preview${activeShape === 'line' || activeShape === 'arrow' ? ' line-preview' : ''}`}
+            style={{
+              left: Math.min(startPoint.x, currentPoint.x),
+              top: Math.min(startPoint.y, currentPoint.y),
+              width: Math.abs(currentPoint.x - startPoint.x),
+              height: Math.abs(currentPoint.y - startPoint.y),
+            }}
+          >
             {(activeShape === 'line' || activeShape === 'arrow') && (
-              <svg style={{ position: 'absolute', overflow: 'visible', left: startPoint.x < currentPoint.x ? 0 : startPoint.x - currentPoint.x, top: startPoint.y < currentPoint.y ? 0 : startPoint.y - currentPoint.y, width: '100%', height: '100%' }}>
+              <svg
+                className="draw-preview-svg"
+                style={{
+                  left: startPoint.x < currentPoint.x ? 0 : startPoint.x - currentPoint.x,
+                  top: startPoint.y < currentPoint.y ? 0 : startPoint.y - currentPoint.y,
+                }}
+              >
                 <line 
                   x1={startPoint.x < currentPoint.x ? 0 : startPoint.x - currentPoint.x} 
                   y1={startPoint.y < currentPoint.y ? 0 : startPoint.y - currentPoint.y} 
                   x2={startPoint.x < currentPoint.x ? currentPoint.x - startPoint.x : 0} 
                   y2={startPoint.y < currentPoint.y ? currentPoint.y - startPoint.y : 0} 
-                  stroke="var(--teal)" strokeWidth={2} markerEnd={activeShape === 'arrow' ? 'url(#arrow)' : ''} />
+                  stroke="var(--accent-blue)"
+                  strokeWidth={1.5}
+                  markerEnd={activeShape === 'arrow' ? 'url(#arrow)' : ''}
+                />
                 {activeShape === 'arrow' && (
                   <defs>
                     <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                      <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--teal)" />
+                      <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent-blue)" />
                     </marker>
                   </defs>
                 )}
@@ -337,6 +339,13 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
                   }}
                 >
                   {span.text}
+                  {isSelectedSpan(span.bbox) && (
+                    <>
+                      {Array.from({ length: 8 }).map((_, idx) => (
+                        <span key={idx} className={`selection-handle p-${idx + 1}`} />
+                      ))}
+                    </>
+                  )}
                 </div>
               );
             })
@@ -347,30 +356,20 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
         {isScanned && !ocrRunning && (
           <div
             className="scanned-img-highlight"
-            style={{ left: '5%', top: '5%', width: '90%', height: '90%' }}
+            style={{ left: '8%', top: '10%', width: '84%', height: '80%' }}
             onClick={runLocalOCR}
             role="button"
             tabIndex={0}
             onKeyDown={(e) => e.key === 'Enter' && runLocalOCR()}
           >
             <div className="ocr-prompt-badge">
-              Scanned page detected -- click to run OCR
+              Scanned page detected
             </div>
-            <div style={{
-              display: 'flex', flexDirection: 'column', alignItems: 'center',
-              justifyContent: 'center', height: '100%', gap: '14px',
-            }}>
-              <span style={{
-                fontSize: '1rem', fontWeight: 800,
-                color: 'var(--orange)', textAlign: 'center', maxWidth: '280px',
-              }}>
-                This page has no text layer.
-                <br />Click to extract text with OCR!
+            <div className="ocr-empty-state">
+              <span className="ocr-empty-label">
+                Click to extract text with OCR
               </span>
-              <button
-                className="btn btn-yellow"
-                style={{ pointerEvents: 'none' }}
-              >
+              <button className="ocr-action-btn" style={{ pointerEvents: 'none' }}>
                 Run OCR
               </button>
             </div>
