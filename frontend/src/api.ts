@@ -36,6 +36,15 @@ export interface EditResponse {
   warnings?: string[];
 }
 
+export interface OCRBlockPayload {
+  text: string;
+  bbox: [number, number, number, number];
+  font_name?: string;
+  font_size?: number;
+  hex_color?: string;
+  auto_shrink?: boolean;
+}
+
 async function parse<T>(res: Response): Promise<T> {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -65,6 +74,8 @@ export const api = {
 
   replace: (sid: string, body: object) => post(`/replace/${sid}`, body).then(parse<EditResponse>),
   editBlock: (sid: string, body: object) => post(`/edit-block/${sid}`, body).then(parse<EditResponse>),
+  persistOcr: (sid: string, body: { page_number: number; blocks: OCRBlockPayload[] }) =>
+    post(`/ocr/${sid}`, body).then(parse<EditResponse>),
   command: (sid: string, command: string) => post(`/command/${sid}`, { command }).then(parse<EditResponse>),
   undo: (sid: string) => post(`/undo/${sid}`).then(parse<EditResponse>),
   redo: (sid: string) => post(`/redo/${sid}`).then(parse<EditResponse>),
@@ -77,4 +88,19 @@ export const api = {
     post(`/pages/duplicate/${sid}`, { page_number: page }).then(parse<EditResponse>),
   insertBlank: (sid: string, afterPage: number) =>
     post(`/pages/insert-blank/${sid}`, { after_page: afterPage }).then(parse<EditResponse>),
+
+  drawShape: (sid: string, body: object) => post(`/draw-shape/${sid}`, body).then(parse<EditResponse>),
+  addHighlight: (sid: string, body: object) => post(`/add-highlight/${sid}`, body).then(parse<EditResponse>),
+  async addImage(sid: string, file: File, x: number, y: number, width: number, height: number, pageNumber: number) {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('x', x.toString());
+    fd.append('y', y.toString());
+    fd.append('width', width.toString());
+    fd.append('height', height.toString());
+    fd.append('page_number', pageNumber.toString());
+    return parse<EditResponse>(
+      await fetch(`${API_BASE}/add-image/${sid}`, { method: 'POST', body: fd })
+    );
+  },
 };

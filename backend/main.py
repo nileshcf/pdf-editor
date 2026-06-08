@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from config import settings
 from deps import session_manager
 from logging_config import configure_logging, get_logger
-from routers import documents, editing, pages
+from routers import documents, editing, pages, annotations
 
 configure_logging()
 log = get_logger("main")
@@ -78,3 +78,4 @@ async def health():
 app.include_router(documents.router)
 app.include_router(editing.router)
 app.include_router(pages.router)
+app.include_router(annotations.router)

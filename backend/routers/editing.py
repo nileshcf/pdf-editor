@@ -8,7 +8,7 @@ import commands
 import pdf_engine as engine
 from deps import build_edit_response, get_session_or_404, session_manager
 from logging_config import get_logger
-from schemas import CommandRequest, EditBlockRequest, EditResponse, ReplaceRequest
+from schemas import CommandRequest, EditBlockRequest, EditResponse, PersistOCRRequest, ReplaceRequest
 
 router = APIRouter(prefix="/api", tags=["editing"])
 log = get_logger("routers.editing")
@@ -63,6 +63,34 @@ async def edit_block(session_id: str, req: EditBlockRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return await run_in_threadpool(build_edit_response, session, "Text block updated.", None, warnings_holder)
+
+
+@router.post("/ocr/{session_id}", response_model=EditResponse)
+async def persist_ocr(session_id: str, req: PersistOCRRequest):
+    get_session_or_404(session_id)
+    warnings_holder: list = []
+
+    def _mutate(doc):
+        warnings_holder.extend(
+            engine.insert_ocr_blocks(
+                doc,
+                req.page_number,
+                [b.model_dump() for b in req.blocks],
+            )
+        )
+
+    try:
+        session, _ = await run_in_threadpool(session_manager.mutate, session_id, _mutate)
+    except (IndexError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await run_in_threadpool(
+        build_edit_response,
+        session,
+        f"OCR text inserted on page {req.page_number}.",
+        None,
+        warnings_holder,
+    )
 
 
 @router.post("/command/{session_id}", response_model=EditResponse)

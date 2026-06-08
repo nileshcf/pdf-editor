@@ -255,4 +255,3 @@ Two independent services. Render is long-lived, so the session/version model
 | `AEROPDF_SESSION_TTL_HOURS` | `24` | Idle-session purge age |
 | `AEROPDF_MAX_HISTORY_VERSIONS` | `50` | Undo/redo depth |
 | `AEROPDF_JSON_LOGS` | `false` | Emit JSON logs |
-                                              

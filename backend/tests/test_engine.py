@@ -149,3 +149,49 @@ def test_reorder_must_be_permutation():
     with pytest.raises(ValueError):
         engine.reorder_pages(doc, [1, 1])
     doc.close()
+
+
+def test_insert_ocr_blocks_adds_text():
+    doc = fitz.open()
+    doc.new_page(width=300, height=200)
+    warnings = engine.insert_ocr_blocks(
+        doc,
+        1,
+        [
+            {
+                "text": "Scanned OCR Text",
+                "bbox": [20, 20, 250, 60],
+                "font_name": "Helvetica",
+                "font_size": 12,
+                "hex_color": "#000000",
+            }
+        ],
+    )
+    assert warnings == []
+    assert "Scanned OCR Text" in doc[0].get_text()
+    doc.close()
+
+
+def test_insert_ocr_blocks_rejects_out_of_bounds():
+    doc = fitz.open()
+    doc.new_page(width=200, height=200)
+    with pytest.raises(ValueError):
+        engine.insert_ocr_blocks(
+            doc,
+            1,
+            [{"text": "Bad", "bbox": [0, 0, 260, 40]}],
+        )
+    doc.close()
+
+
+def test_insert_image_rejects_outside_page():
+    doc = fitz.open()
+    doc.new_page(width=200, height=200)
+    png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc`\x00\x00"
+        b"\x00\x02\x00\x01\xe2!\xbc3\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    with pytest.raises(ValueError):
+        engine.insert_image(doc, 1, png, [180, 180, 260, 260])
+    doc.close()

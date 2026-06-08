@@ -441,3 +441,126 @@ def insert_blank_page(
     w = width or (ref.rect.width if ref else 595.0)
     h = height or (ref.rect.height if ref else 842.0)
     doc.new_page(pno=after_page, width=w, height=h)
+
+
+# --------------------------------------------------------------------------- #
+#  Annotations & Drawing
+# --------------------------------------------------------------------------- #
+def insert_image(doc: "fitz.Document", page_number: int, image_bytes: bytes, rect: List[float]) -> None:
+    if not 1 <= page_number <= doc.page_count:
+        raise IndexError("Page number out of bounds")
+    page = doc[page_number - 1]
+    r = fitz.Rect(rect)
+    if r.width <= 0 or r.height <= 0:
+        raise ValueError("Image rectangle must have positive width and height")
+    if r.x0 < page.rect.x0 or r.y0 < page.rect.y0 or r.x1 > page.rect.x1 or r.y1 > page.rect.y1:
+        raise ValueError("Image rectangle is outside page bounds")
+    page.insert_image(r, stream=image_bytes)
+
+def draw_shape(
+    doc: "fitz.Document", page_number: int, shape_type: str, bbox: List[float],
+    stroke_color: str, fill_color: Optional[str], line_width: float
+) -> None:
+    if not 1 <= page_number <= doc.page_count:
+        raise IndexError("Page number out of bounds")
+    page = doc[page_number - 1]
+    rect = fitz.Rect(bbox)
+    if line_width <= 0:
+        raise ValueError("line_width must be > 0")
+    if shape_type in {"rect", "circle"} and (rect.width <= 0 or rect.height <= 0):
+        raise ValueError("Shape bbox must have positive width and height")
+    if rect.x0 < page.rect.x0 or rect.y0 < page.rect.y0 or rect.x1 > page.rect.x1 or rect.y1 > page.rect.y1:
+        raise ValueError("Shape bbox is outside page bounds")
+    sc = hex_to_rgb01(stroke_color)
+    fc = hex_to_rgb01(fill_color) if fill_color else None
+
+    shape = page.new_shape()
+    if shape_type == "rect":
+        shape.draw_rect(rect)
+    elif shape_type == "circle":
+        # center is middle of rect
+        center = fitz.Point((rect.x0 + rect.x1)/2, (rect.y0 + rect.y1)/2)
+        rx = rect.width / 2
+        ry = rect.height / 2
+        shape.draw_oval(rect)
+    elif shape_type == "line":
+        shape.draw_line(fitz.Point(rect.x0, rect.y0), fitz.Point(rect.x1, rect.y1))
+    elif shape_type == "arrow":
+        shape.draw_line(fitz.Point(rect.x0, rect.y0), fitz.Point(rect.x1, rect.y1))
+        # PyMuPDF doesn't have an arrow primitive in shape, so we add a line and then use line annotation? 
+        # Actually, draw_line doesn't add an arrowhead. We can just add a line annot if it's an arrow.
+        # But let's just stick to lines for simplicity, or add a line annot.
+        pass
+
+    if shape_type == "arrow":
+        # Use an annotation for arrow
+        annot = page.add_line_annot(fitz.Point(rect.x0, rect.y0), fitz.Point(rect.x1, rect.y1))
+        annot.set_line_ends(0, fitz.PDF_ANNOT_LE_OPEN_ARROW)
+        annot.set_colors(stroke=sc)
+        annot.set_border(width=line_width)
+        annot.update()
+    else:
+        shape.finish(color=sc, fill=fc, width=line_width)
+        shape.commit()
+
+def add_highlight(doc: "fitz.Document", page_number: int, bbox: List[float], color: str) -> None:
+    if not 1 <= page_number <= doc.page_count:
+        raise IndexError("Page number out of bounds")
+    page = doc[page_number - 1]
+    rect = fitz.Rect(bbox)
+    if rect.width <= 0 or rect.height <= 0:
+        raise ValueError("Highlight bbox must have positive width and height")
+    if rect.x0 < page.rect.x0 or rect.y0 < page.rect.y0 or rect.x1 > page.rect.x1 or rect.y1 > page.rect.y1:
+        raise ValueError("Highlight bbox is outside page bounds")
+    c = hex_to_rgb01(color)
+    annot = page.add_highlight_annot(rect)
+    annot.set_colors(stroke=c)
+    annot.update()
+
+
+def insert_ocr_blocks(
+    doc: "fitz.Document",
+    page_number: int,
+    blocks: List[Dict[str, Any]],
+) -> List[str]:
+    """Insert OCR-derived text boxes onto a page and return non-fatal warnings."""
+    if not 1 <= page_number <= doc.page_count:
+        raise IndexError("Page number out of bounds")
+    page = doc[page_number - 1]
+    warnings: List[str] = []
+
+    for idx, block in enumerate(blocks, start=1):
+        text = (block.get("text") or "").strip()
+        if not text:
+            continue
+
+        rect = fitz.Rect(block["bbox"])
+        if rect.width <= 0 or rect.height <= 0:
+            raise ValueError(f"OCR block {idx} has invalid bbox dimensions")
+        if rect.x0 < page.rect.x0 or rect.y0 < page.rect.y0 or rect.x1 > page.rect.x1 or rect.y1 > page.rect.y1:
+            raise ValueError(f"OCR block {idx} is outside page bounds")
+
+        font_name = resolve_pdf_font(block.get("font_name", "Helvetica"))
+        font_size = max(MIN_FONT_SIZE, float(block.get("font_size", 12.0)))
+        color = hex_to_rgb01(block.get("hex_color", "#000000"))
+        auto_shrink = bool(block.get("auto_shrink", True))
+
+        if auto_shrink:
+            fitted, fits = _fit_fontsize(rect, text, font_name, font_size, align=0)
+            font_size = fitted
+            if not fits:
+                warnings.append(f"OCR block {idx} is too long and may be clipped.")
+
+        leftover = page.insert_textbox(
+            rect,
+            text,
+            fontsize=font_size,
+            fontname=font_name,
+            color=color,
+            align=0,
+        )
+        if leftover < 0:
+            warnings.append(f"OCR block {idx} overflowed and may be clipped.")
+
+    return warnings
+

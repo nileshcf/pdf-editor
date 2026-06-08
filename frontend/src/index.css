@@ -115,9 +115,37 @@ body {
 /* ── Workspace 3-column grid ── */
 .workspace-layout {
   display: grid;
-  grid-template-columns: var(--sidebar-width) 1fr var(--properties-width);
+  grid-template-columns: var(--sidebar-width) auto 1fr auto var(--properties-width);
   height: calc(100vh - var(--header-height));
   overflow: hidden;
+}
+
+/* ── Resize handles ── */
+.resize-handle {
+  width: 8px;
+  cursor: col-resize;
+  background: var(--light-gray);
+  position: relative;
+  z-index: 10;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  transition: background 0.15s;
+}
+.resize-handle::after {
+  content: '';
+  width: 3px;
+  height: 24px;
+  background: var(--medium);
+  border-radius: var(--r-pill);
+  transition: background 0.15s, height 0.15s;
+}
+.resize-handle:hover, .resize-handle:active {
+  background: rgba(0, 188, 212, 0.15);
+}
+.resize-handle:hover::after, .resize-handle:active::after {
+  background: var(--teal);
+  height: 48px;
 }
 
 /* ── Sidebar ── */
@@ -341,6 +369,10 @@ body {
   outline: 2px dashed var(--teal);
   background: rgba(0, 188, 212, 0.09);
 }
+.editable-text-block.selected {
+  outline: 2px solid var(--teal-dark);
+  background: rgba(0, 188, 212, 0.16);
+}
 .editable-text-block:focus {
   outline: 2px solid var(--teal);
   background: rgba(0, 188, 212, 0.06);
@@ -420,7 +452,9 @@ body {
 .thumbnail-item {
   position: relative;
   width: 100%;
-  height: 96px;
+  height: auto;
+  min-height: 96px;
+  max-height: 160px;
   margin-bottom: 10px;
   background: var(--white);
   border: 2.5px solid var(--border);

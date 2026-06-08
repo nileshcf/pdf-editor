@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.js?url';
 import { createWorker } from 'tesseract.js';
+import type { OCRBlockPayload } from '../api';
 
-// Worker CDN must match pdfjs-dist version (3.4.120)
-pdfjsLib.GlobalWorkerOptions.workerSrc =
-  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+import { ShapeType } from './ShapeToolbar';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const SCALE = 1.25;
 
@@ -23,6 +25,7 @@ interface SelectedBlock {
   font: string;
   size: number;
   color: string;
+  flags?: number;
 }
 
 interface PDFCanvasProps {
@@ -32,7 +35,10 @@ interface PDFCanvasProps {
   // re-renders the latest version (the download URL itself is static).
   docVersion: number;
   onSelectBlock: (block: SelectedBlock) => void;
-  onOCRComplete: (pageNum: number, ocrBlocks: any[]) => void;
+  onOCRComplete: (pageNum: number, ocrBlocks: OCRBlockPayload[]) => Promise<void> | void;
+  selectedBlock: SelectedBlock | null;
+  activeShape?: ShapeType | null;
+  onDrawShape?: (bbox: number[]) => void;
 }
 
 export const PDFCanvas: React.FC<PDFCanvasProps> = ({
@@ -41,12 +47,59 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
   docVersion,
   onSelectBlock,
   onOCRComplete,
+  selectedBlock,
+  activeShape,
+  onDrawShape,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [rendering, setRendering] = useState(false);
   const [ocrRunning, setOcrRunning] = useState(false);
   const [ocrProgress, setOcrProgress] = useState(0);
   const [ocrStatus, setOcrStatus] = useState('');
+
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [startPoint, setStartPoint] = useState<{ x: number; y: number } | null>(null);
+  const [currentPoint, setCurrentPoint] = useState<{ x: number; y: number } | null>(null);
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+    if (!activeShape) return;
+    setIsDrawing(true);
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    setStartPoint({ x, y });
+    setCurrentPoint({ x, y });
+  };
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!isDrawing || !startPoint) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    setCurrentPoint({ x, y });
+  };
+
+  const handlePointerUp = () => {
+    if (!isDrawing || !startPoint || !currentPoint || !onDrawShape) return;
+    setIsDrawing(false);
+    
+    const pdfX0 = (Math.min(startPoint.x, currentPoint.x) / SCALE);
+    const pdfY0 = (Math.min(startPoint.y, currentPoint.y) / SCALE);
+    const pdfX1 = (Math.max(startPoint.x, currentPoint.x) / SCALE);
+    const pdfY1 = (Math.max(startPoint.y, currentPoint.y) / SCALE);
+
+    let bbox = [pdfX0, pdfY0, pdfX1, pdfY1];
+    if (activeShape === 'line' || activeShape === 'arrow') {
+      bbox = [startPoint.x / SCALE, startPoint.y / SCALE, currentPoint.x / SCALE, currentPoint.y / SCALE];
+    }
+    
+    if (Math.abs(currentPoint.x - startPoint.x) > 5 || Math.abs(currentPoint.y - startPoint.y) > 5) {
+      onDrawShape(bbox);
+    }
+    
+    setStartPoint(null);
+    setCurrentPoint(null);
+  };
 
   /**
    * Bug fix: the old code used a stale `rendering` state closure as a guard,
@@ -99,13 +152,14 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
   // OCR via Tesseract.js
   const runLocalOCR = async () => {
     if (!canvasRef.current || ocrRunning) return;
+    let worker: any = null;
     try {
       setOcrRunning(true);
       setOcrProgress(5);
       setOcrStatus('Starting OCR engine...');
 
       const canvas = canvasRef.current;
-      const worker = await createWorker({
+      worker = await createWorker({
         logger: (m: any) => {
           if (m.status === 'recognizing text') {
             setOcrStatus('Reading characters...');
@@ -124,7 +178,7 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
 
       const cw = canvas.width;
       const ch = canvas.height;
-      const ocrBlocks: any[] = data.paragraphs
+      const ocrBlocks: OCRBlockPayload[] = data.paragraphs
         .filter((p: any) => p.text.trim().length > 0)
         .map((p: any) => {
           const { x0, y0, x1, y1 } = p.bbox;
@@ -133,31 +187,40 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
           const pdfX1 = (x1 / cw) * page.width;
           const pdfY1 = (y1 / ch) * page.height;
           return {
+            text: p.text.trim(),
             bbox: [pdfX0, pdfY0, pdfX1, pdfY1],
-            lines: [{
-              bbox: [pdfX0, pdfY0, pdfX1, pdfY1],
-              spans: [{
-                text: p.text.trim(),
-                bbox: [pdfX0, pdfY0, pdfX1, pdfY1],
-                font: 'Helvetica',
-                size: 12,
-                color: '#000000',
-              }],
-            }],
+            font_name: 'Helvetica',
+            font_size: 12,
+            hex_color: '#000000',
+            auto_shrink: true,
           };
         });
-
-      await worker.terminate();
-      setOcrRunning(false);
-      onOCRComplete(page.number, ocrBlocks);
+      if (!ocrBlocks.length) {
+        setOcrStatus('No text detected on this page.');
+        return;
+      }
+      setOcrProgress(100);
+      setOcrStatus('Saving OCR text...');
+      await onOCRComplete(page.number, ocrBlocks);
     } catch (err) {
       console.error('OCR error:', err);
       setOcrStatus('OCR failed. Please try again.');
+    } finally {
+      try {
+        await worker?.terminate();
+      } catch {
+        // no-op
+      }
       setOcrRunning(false);
     }
   };
 
   const isScanned = page.blocks.length === 0 && page.images.length > 0;
+  const isSelectedSpan = (bbox: number[]) => {
+    if (!selectedBlock || selectedBlock.pageNumber !== page.number) return false;
+    const eps = 0.01;
+    return bbox.length === 4 && selectedBlock.bbox.every((v, i) => Math.abs(v - bbox[i]) < eps);
+  };
 
   return (
     <div
@@ -198,7 +261,43 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
       <canvas ref={canvasRef} className="pdf-canvas" />
 
       {/* WYSIWYG editable overlay */}
-      <div className="editing-overlay-layer">
+      <div 
+        className="editing-overlay-layer"
+        style={{ pointerEvents: activeShape ? 'auto' : 'none', cursor: activeShape ? 'crosshair' : 'default' }}
+        onPointerDown={activeShape ? handlePointerDown : undefined}
+        onPointerMove={activeShape ? handlePointerMove : undefined}
+        onPointerUp={activeShape ? handlePointerUp : undefined}
+      >
+        {isDrawing && startPoint && currentPoint && (
+          <div style={{
+            position: 'absolute',
+            left: Math.min(startPoint.x, currentPoint.x),
+            top: Math.min(startPoint.y, currentPoint.y),
+            width: Math.abs(currentPoint.x - startPoint.x),
+            height: Math.abs(currentPoint.y - startPoint.y),
+            border: activeShape === 'line' || activeShape === 'arrow' ? 'none' : '2px solid var(--teal)',
+            background: activeShape === 'line' || activeShape === 'arrow' ? 'none' : 'rgba(0,188,212,0.2)',
+            pointerEvents: 'none', zIndex: 50
+          }}>
+            {(activeShape === 'line' || activeShape === 'arrow') && (
+              <svg style={{ position: 'absolute', overflow: 'visible', left: startPoint.x < currentPoint.x ? 0 : startPoint.x - currentPoint.x, top: startPoint.y < currentPoint.y ? 0 : startPoint.y - currentPoint.y, width: '100%', height: '100%' }}>
+                <line 
+                  x1={startPoint.x < currentPoint.x ? 0 : startPoint.x - currentPoint.x} 
+                  y1={startPoint.y < currentPoint.y ? 0 : startPoint.y - currentPoint.y} 
+                  x2={startPoint.x < currentPoint.x ? currentPoint.x - startPoint.x : 0} 
+                  y2={startPoint.y < currentPoint.y ? currentPoint.y - startPoint.y : 0} 
+                  stroke="var(--teal)" strokeWidth={2} markerEnd={activeShape === 'arrow' ? 'url(#arrow)' : ''} />
+                {activeShape === 'arrow' && (
+                  <defs>
+                    <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                      <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--teal)" />
+                    </marker>
+                  </defs>
+                )}
+              </svg>
+            )}
+          </div>
+        )}
         {page.blocks.map((block, bIdx) =>
           block.lines.map((line: any, lIdx: number) =>
             line.spans.map((span: any, sIdx: number) => {
@@ -211,8 +310,8 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
               return (
                 <div
                   key={`${bIdx}-${lIdx}-${sIdx}`}
-                  className="editable-text-block"
-                  title="Double-click to edit"
+                  className={`editable-text-block${isSelectedSpan(span.bbox) ? ' selected' : ''}`}
+                  title={activeShape ? "" : "Double-click to edit"}
                   style={{
                     left: `${x0 * SCALE}px`,
                     top: `${y0 * SCALE}px`,
@@ -221,8 +320,10 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
                     fontSize: `${span.size * SCALE}px`,
                     fontFamily,
                     color: 'transparent',
+                    pointerEvents: activeShape ? 'none' : 'auto',
                   }}
                   onDoubleClick={(e) => {
+                    if (activeShape) return;
                     e.stopPropagation();
                     onSelectBlock({
                       pageNumber: page.number,
@@ -231,6 +332,7 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
                       font: span.font,
                       size: span.size,
                       color: span.color,
+                      flags: span.flags,
                     });
                   }}
                 >

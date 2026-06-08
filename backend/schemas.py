@@ -8,6 +8,13 @@ from pydantic import BaseModel, Field, field_validator
 HEX_RE = r"^#?[0-9a-fA-F]{6}$"
 
 
+def _validate_rect(v: List[float]) -> List[float]:
+    x0, y0, x1, y1 = v
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError("bbox must satisfy x1 > x0 and y1 > y0")
+    return v
+
+
 # --------------------------------------------------------------------------- #
 #  Requests
 # --------------------------------------------------------------------------- #
@@ -32,10 +39,7 @@ class EditBlockRequest(BaseModel):
     @field_validator("original_bbox")
     @classmethod
     def _valid_rect(cls, v: List[float]) -> List[float]:
-        x0, y0, x1, y1 = v
-        if x1 <= x0 or y1 <= y0:
-            raise ValueError("bbox must satisfy x1 > x0 and y1 > y0")
-        return v
+        return _validate_rect(v)
 
 
 class CommandRequest(BaseModel):
@@ -71,6 +75,50 @@ class InsertBlankRequest(BaseModel):
     after_page: int = Field(ge=0)  # 0 => insert at the very beginning
     width: Optional[float] = None
     height: Optional[float] = None
+
+
+class DrawShapeRequest(BaseModel):
+    page_number: int = Field(ge=1)
+    shape_type: str = Field(pattern="^(rect|circle|line|arrow)$")
+    bbox: List[float] = Field(min_length=4, max_length=4)
+    stroke_color: str = Field(pattern=HEX_RE)
+    fill_color: Optional[str] = Field(default=None, pattern=HEX_RE)
+    line_width: float = Field(default=1.0, gt=0)
+
+    @field_validator("bbox")
+    @classmethod
+    def _valid_rect(cls, v: List[float]) -> List[float]:
+        return _validate_rect(v)
+
+
+class HighlightRequest(BaseModel):
+    page_number: int = Field(ge=1)
+    bbox: List[float] = Field(min_length=4, max_length=4)
+    color: str = Field(pattern=HEX_RE)
+
+    @field_validator("bbox")
+    @classmethod
+    def _valid_rect(cls, v: List[float]) -> List[float]:
+        return _validate_rect(v)
+
+
+class OCRBlockRequest(BaseModel):
+    text: str = Field(min_length=1)
+    bbox: List[float] = Field(min_length=4, max_length=4)
+    font_name: str = "Helvetica"
+    font_size: float = Field(default=12.0, gt=0, le=400)
+    hex_color: str = Field(default="#000000", pattern=HEX_RE)
+    auto_shrink: bool = True
+
+    @field_validator("bbox")
+    @classmethod
+    def _valid_rect(cls, v: List[float]) -> List[float]:
+        return _validate_rect(v)
+
+
+class PersistOCRRequest(BaseModel):
+    page_number: int = Field(ge=1)
+    blocks: List[OCRBlockRequest] = Field(min_length=1)
 
 
 # --------------------------------------------------------------------------- #

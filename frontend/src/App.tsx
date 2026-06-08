@@ -5,7 +5,9 @@ import { PDFCanvas } from './components/PDFCanvas';
 import { PropertiesPanel } from './components/PropertiesPanel';
 import { CommandConsole } from './components/CommandConsole';
 import { PageToolbar } from './components/PageToolbar';
-import { api, EditResponse, HistoryState, PDFPage } from './api';
+import { ImageInsertModal } from './components/ImageInsertModal';
+import { ShapeToolbar, ShapeType } from './components/ShapeToolbar';
+import { api, EditResponse, HistoryState, OCRBlockPayload, PDFPage } from './api';
 
 interface Session {
   session_id: string;
@@ -13,7 +15,7 @@ interface Session {
   metadata: { title: string; author: string; pages: number };
   pages: PDFPage[];
 }
-interface SelectedBlock { pageNumber: number; bbox: number[]; text: string; font: string; size: number; color: string; }
+interface SelectedBlock { pageNumber: number; bbox: number[]; text: string; font: string; size: number; color: string; flags?: number; }
 interface Toast { text: string; type: 'success' | 'error' | 'info' | null; }
 
 function App() {
@@ -26,6 +28,61 @@ function App() {
   const [toast, setToast] = useState<Toast>({ text: '', type: null });
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [showImageModal, setShowImageModal] = useState(false);
+  const [activeShape, setActiveShape] = useState<ShapeType | null>(null);
+  const [strokeColor, setStrokeColor] = useState('#00bcd4');
+  const [fillColor, setFillColor] = useState('');
+  const [lineWidth, setLineWidth] = useState(2);
+
+  const [sidebarWidth, setSidebarWidth] = useState(() => parseInt(localStorage.getItem('sidebarWidth') || '240'));
+  const [propertiesWidth, setPropertiesWidth] = useState(() => parseInt(localStorage.getItem('propertiesWidth') || '290'));
+
+  const startSidebarResize = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebarWidth;
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const newWidth = Math.min(Math.max(140, startWidth + (moveEvent.clientX - startX)), 400);
+      setSidebarWidth(newWidth);
+    };
+
+    const onPointerUp = () => {
+      document.removeEventListener('pointermove', onPointerMove);
+      document.removeEventListener('pointerup', onPointerUp);
+      setSidebarWidth((currentWidth) => {
+        localStorage.setItem('sidebarWidth', currentWidth.toString());
+        return currentWidth;
+      });
+    };
+
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', onPointerUp);
+  }, [sidebarWidth]);
+
+  const startPropertiesResize = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = propertiesWidth;
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const newWidth = Math.min(Math.max(200, startWidth - (moveEvent.clientX - startX)), 500);
+      setPropertiesWidth(newWidth);
+    };
+
+    const onPointerUp = () => {
+      document.removeEventListener('pointermove', onPointerMove);
+      document.removeEventListener('pointerup', onPointerUp);
+      setPropertiesWidth((currentWidth) => {
+        localStorage.setItem('propertiesWidth', currentWidth.toString());
+        return currentWidth;
+      });
+    };
+
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', onPointerUp);
+  }, [propertiesWidth]);
 
   const showToast = (text: string, type: Toast['type']) => {
     setToast({ text, type });
@@ -114,17 +171,64 @@ function App() {
   const handleRotate = (deg: number) => sid && run(() => api.rotate(sid, activePage, deg));
   const handleDuplicate = () => sid && run(() => api.duplicate(sid, activePage));
   const handleInsertBlank = () => sid && run(() => api.insertBlank(sid, activePage));
-  const handleDelete = () => sid && run(() => api.deletePages(sid, [activePage]));
+  const handleDelete = () => {
+    if (!sid) return;
+    if (!window.confirm(`Delete page ${activePage}? This action can be undone.`)) return;
+    run(() => api.deletePages(sid, [activePage]));
+  };
 
   const handleExportPDF = () => { if (sid) window.open(api.downloadUrl(sid), '_blank'); };
 
-  const handleOCRComplete = (pageNum: number, ocrBlocks: any[]) => {
-    if (!session) return;
-    setSession({
-      ...session,
-      pages: session.pages.map((p) => (p.number === pageNum ? { ...p, blocks: [...p.blocks, ...ocrBlocks] } : p)),
-    });
-    showToast('OCR complete — text is now editable!', 'success');
+  const handleOCRComplete = async (pageNum: number, ocrBlocks: OCRBlockPayload[]) => {
+    if (!sid) return;
+    if (!ocrBlocks.length) {
+      showToast('No text detected on this page.', 'info');
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const data = await api.persistOcr(sid, { page_number: pageNum, blocks: ocrBlocks });
+      applyEdit(data, `OCR text saved on page ${pageNum}.`);
+    } catch (err: any) {
+      showToast(err.message, 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleInsertImage = async (file: File, x: number, y: number, w: number, h: number) => {
+    if (!sid) return;
+    setIsLoading(true);
+    try {
+      const data = await api.addImage(sid, file, x, y, w, h, activePage);
+      applyEdit(data, 'Image inserted!');
+      setShowImageModal(false);
+    } catch (err: any) {
+      showToast(err.message, 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleDrawShape = async (bbox: number[]) => {
+    if (!sid || !activeShape) return;
+    setIsLoading(true);
+    try {
+      const data = await api.drawShape(sid, {
+        page_number: activePage,
+        shape_type: activeShape,
+        bbox,
+        stroke_color: strokeColor,
+        fill_color: fillColor || undefined,
+        line_width: lineWidth,
+      });
+      applyEdit(data, 'Shape added!');
+      setActiveShape(null);
+    } catch (err: any) {
+      showToast(err.message, 'error');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // Keyboard shortcuts: Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z (or Ctrl+Y) redo.
@@ -253,9 +357,14 @@ function App() {
           </div>
         </div>
       ) : (
-        <div className="workspace-layout">
+        <div className="workspace-layout" style={{
+          '--sidebar-width': `${sidebarWidth}px`,
+          '--properties-width': `${propertiesWidth}px`
+        } as React.CSSProperties}>
           <Sidebar pages={session.pages} activePage={activePage} filename={session.filename}
+            pdfUrl={api.downloadUrl(session.session_id)} docVersion={history?.version ?? 0}
             setActivePage={(n) => { setActivePage(n); setSelectedBlock(null); }} />
+          <div className="resize-handle" onPointerDown={startSidebarResize} onDoubleClick={() => { setSidebarWidth(240); localStorage.setItem('sidebarWidth', '240'); }} />
           <main className="canvas-viewport">
             {toast.text && (
               <div className="fade-in" style={{
@@ -284,11 +393,35 @@ function App() {
             <PDFCanvas page={session.pages[activePage - 1]}
               pdfUrl={api.downloadUrl(session.session_id)}
               docVersion={history?.version ?? 0}
-              onSelectBlock={setSelectedBlock} onOCRComplete={handleOCRComplete} />
+              onSelectBlock={setSelectedBlock}
+              onOCRComplete={handleOCRComplete}
+              selectedBlock={selectedBlock}
+              activeShape={activeShape} onDrawShape={handleDrawShape} />
+            {activeShape && (
+              <ShapeToolbar
+                activeShape={activeShape} onSelectShape={setActiveShape}
+                strokeColor={strokeColor} onChangeStrokeColor={setStrokeColor}
+                fillColor={fillColor} onChangeFillColor={setFillColor}
+                lineWidth={lineWidth} onChangeLineWidth={setLineWidth}
+              />
+            )}
           </main>
+          <div className="resize-handle" onPointerDown={startPropertiesResize} onDoubleClick={() => { setPropertiesWidth(290); localStorage.setItem('propertiesWidth', '290'); }} />
           <PropertiesPanel selectedBlock={selectedBlock} onSaveBlockEdits={handleSaveBlockEdits}
-            onSearchReplace={handleSearchReplace} isLoading={isLoading} activePage={activePage} />
+            onSearchReplace={handleSearchReplace} 
+            onInsertImage={() => setShowImageModal(true)}
+            onToggleDraw={() => setActiveShape(activeShape ? null : 'rect')}
+            isDrawing={!!activeShape}
+            isLoading={isLoading} activePage={activePage} />
         </div>
+      )}
+
+      {showImageModal && (
+        <ImageInsertModal
+          onClose={() => setShowImageModal(false)}
+          onInsert={handleInsertImage}
+          isLoading={isLoading}
+        />
       )}
     </div>
   );

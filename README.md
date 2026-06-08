@@ -134,4 +134,4 @@ For an AI-readable codebase guide (patterns, gotchas, state flow) see [`CLAUDE.m
 
 ## Contributing
 
-PRs welcome. Run `tsc 
+PRs welcome. Run `tsc --noEmit` in `frontend/` before committing to catch type errors.

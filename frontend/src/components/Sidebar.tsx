@@ -1,4 +1,8 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.js?url';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 interface PDFPage {
   number: number;
@@ -12,10 +16,64 @@ interface SidebarProps {
   pages: PDFPage[];
   activePage: number;
   filename: string;
+  pdfUrl: string;
+  docVersion: number;
   setActivePage: (pageNum: number) => void;
 }
 
-export const Sidebar: React.FC<SidebarProps> = ({ pages, activePage, filename, setActivePage }) => {
+const ThumbnailCanvas: React.FC<{ page: PDFPage; pdfDoc: any }> = ({ page, pdfDoc }) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let renderTask: any = null;
+    const renderPage = async () => {
+      if (!canvasRef.current || !pdfDoc) return;
+      try {
+        const pdfPage = await pdfDoc.getPage(page.number);
+        if (cancelled) return;
+        const viewport = pdfPage.getViewport({ scale: 1 });
+        const thumbHeight = 120; // max height
+        const scale = thumbHeight / viewport.height;
+        const scaledViewport = pdfPage.getViewport({ scale });
+        
+        const canvas = canvasRef.current;
+        canvas.width = scaledViewport.width;
+        canvas.height = scaledViewport.height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          renderTask = pdfPage.render({ canvasContext: ctx, viewport: scaledViewport });
+          await renderTask.promise;
+        }
+      } catch (err) {
+        // ignore cancellation
+      }
+    };
+    renderPage();
+    return () => { cancelled = true; renderTask?.cancel(); };
+  }, [page, pdfDoc]);
+
+  return <canvas ref={canvasRef} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />;
+};
+
+export const Sidebar: React.FC<SidebarProps> = ({ pages, activePage, filename, pdfUrl, docVersion, setActivePage }) => {
+  const [pdfDoc, setPdfDoc] = useState<any>(null);
+
+  useEffect(() => {
+    let loadingTask: any = null;
+    const loadPdf = async () => {
+      if (!pdfUrl) return;
+      try {
+        loadingTask = pdfjsLib.getDocument(pdfUrl + '?v=' + docVersion);
+        const doc = await loadingTask.promise;
+        setPdfDoc(doc);
+      } catch (err) {
+        console.error('Sidebar PDF load error:', err);
+      }
+    };
+    loadPdf();
+    return () => { loadingTask?.destroy(); };
+  }, [pdfUrl, docVersion]);
   return (
     <aside className="sidebar">
       <div style={{
@@ -62,24 +120,25 @@ export const Sidebar: React.FC<SidebarProps> = ({ pages, activePage, filename, s
               width: '100%', height: '100%',
               display: 'flex', flexDirection: 'column',
               alignItems: 'center', justifyContent: 'center',
-              gap: '6px', padding: '10px',
+              position: 'relative'
             }}>
-              <span style={{ fontSize: '0.72rem', fontWeight: 800, color: isActive ? 'var(--teal-dark)' : 'var(--medium)' }}>
-                {isScanned ? '[Scan]' : '[Text]'} Page {page.number}
-              </span>
+              {pdfDoc ? (
+                <ThumbnailCanvas page={page} pdfDoc={pdfDoc} />
+              ) : (
+                <div style={{ padding: '20px', color: 'var(--medium)', fontSize: '0.8rem', fontWeight: 800 }}>Loading...</div>
+              )}
               {isScanned && (
                 <span style={{
+                  position: 'absolute', top: '4px', left: '4px',
                   background: 'var(--orange)', color: 'white',
                   fontSize: '0.58rem', fontWeight: 900,
                   padding: '2px 7px', borderRadius: 'var(--r-pill)',
                   textTransform: 'uppercase', letterSpacing: '0.5px',
+                  zIndex: 10
                 }}>
                   Scanned
                 </span>
               )}
-              <span style={{ fontSize: '0.6rem', color: 'var(--medium)', fontWeight: 600, opacity: 0.7 }}>
-                {Math.round(page.width)}x{Math.round(page.height)}
-              </span>
             </div>
             <div className="thumbnail-num">{page.number}</div>
           </div>

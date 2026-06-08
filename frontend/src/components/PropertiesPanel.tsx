@@ -7,6 +7,7 @@ interface SelectedBlock {
   font: string;
   size: number;
   color: string;
+  flags?: number;
 }
 
 interface PropertiesPanelProps {
@@ -18,6 +19,9 @@ interface PropertiesPanelProps {
     pageOnly: boolean,
     opts: { caseSensitive: boolean; wholeWord: boolean }
   ) => void;
+  onInsertImage: () => void;
+  onToggleDraw: () => void;
+  isDrawing: boolean;
   isLoading: boolean;
   activePage: number;
 }
@@ -44,7 +48,7 @@ const Check: React.FC<{ label: string; checked: boolean; onChange: (v: boolean) 
 );
 
 export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
-  selectedBlock, onSaveBlockEdits, onSearchReplace, isLoading, activePage,
+  selectedBlock, onSaveBlockEdits, onSearchReplace, onInsertImage, onToggleDraw, isDrawing, isLoading, activePage,
 }) => {
   const [textVal, setTextVal] = useState('');
   const [fontSize, setFontSize] = useState(12);
@@ -56,15 +60,67 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [wholeWord, setWholeWord] = useState(false);
 
+  const [isBold, setIsBold] = useState(false);
+  const [isItalic, setIsItalic] = useState(false);
+
+  const resolveFont = (base: string, b: boolean, i: boolean) => {
+    if (base.includes('Helvetica')) {
+      if (b && i) return 'Helvetica-BoldOblique';
+      if (b) return 'Helvetica-Bold';
+      if (i) return 'Helvetica-Oblique';
+      return 'Helvetica';
+    }
+    if (base.includes('Times')) {
+      if (b && i) return 'Times-BoldItalic';
+      if (b) return 'Times-Bold';
+      if (i) return 'Times-Italic';
+      return 'Times-Roman';
+    }
+    if (base.includes('Courier')) {
+      if (b && i) return 'Courier-BoldOblique';
+      if (b) return 'Courier-Bold';
+      if (i) return 'Courier-Oblique';
+      return 'Courier';
+    }
+    return base;
+  };
+
   useEffect(() => {
     if (selectedBlock) {
       setTextVal(selectedBlock.text);
       setFontSize(Math.round(selectedBlock.size));
-      setFontFamily(selectedBlock.font || 'Helvetica');
+      
+      const f = selectedBlock.flags || 0;
+      const b = !!(f & (1 << 4)) || (selectedBlock.font || '').toLowerCase().includes('bold');
+      const i = !!(f & (1 << 1)) || (selectedBlock.font || '').toLowerCase().includes('italic') || (selectedBlock.font || '').toLowerCase().includes('oblique');
+      setIsBold(b);
+      setIsItalic(i);
+
+      let baseFont = 'Helvetica';
+      if ((f & (1 << 3)) || (selectedBlock.font || '').toLowerCase().includes('courier')) baseFont = 'Courier';
+      else if ((f & (1 << 2)) || (selectedBlock.font || '').toLowerCase().includes('times')) baseFont = 'Times';
+      
+      setFontFamily(resolveFont(baseFont, b, i));
       setColorHex(selectedBlock.color || '#000000');
       setAlign(0);
     }
   }, [selectedBlock]);
+
+  const toggleBold = () => {
+    const next = !isBold;
+    setIsBold(next);
+    setFontFamily(resolveFont(fontFamily, next, isItalic));
+  };
+
+  const toggleItalic = () => {
+    const next = !isItalic;
+    setIsItalic(next);
+    setFontFamily(resolveFont(fontFamily, isBold, next));
+  };
+
+  const onBaseFontChange = (val: string) => {
+    setFontFamily(resolveFont(val, isBold, isItalic));
+  };
 
   return (
     <aside className="properties-panel">
@@ -103,16 +159,34 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                 </div>
               </div>
             </div>
-            <FL t="Typeface" />
-            <select className="input-text" value={fontFamily}
-              onChange={(e) => setFontFamily(e.target.value)}
-              style={{ marginBottom: '10px', background: 'var(--white)' }}>
-              <option value="Helvetica">Helvetica — Sans-Serif</option>
-              <option value="Helvetica-Bold">Helvetica Bold</option>
-              <option value="Times-Roman">Times Roman — Serif</option>
-              <option value="Times-Bold">Times Bold</option>
-              <option value="Courier">Courier — Monospace</option>
-            </select>
+            <FL t="Typeface & Style" />
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+              <select className="input-text" value={fontFamily.split('-')[0].replace('Times', 'Times-Roman')}
+                onChange={(e) => onBaseFontChange(e.target.value)}
+                style={{ background: 'var(--white)', flex: 1 }}>
+                <option value="Helvetica">Helvetica</option>
+                <option value="Times-Roman">Times</option>
+                <option value="Courier">Courier</option>
+              </select>
+              <button 
+                onClick={toggleBold} 
+                style={{ 
+                  width: '38px', height: '38px', 
+                  borderRadius: 'var(--r-sm)', border: '2.5px solid var(--border)', 
+                  background: isBold ? 'var(--teal-light)' : 'var(--white)', 
+                  color: isBold ? 'white' : 'var(--dark)',
+                  fontWeight: 900, cursor: 'pointer' 
+                }}>B</button>
+              <button 
+                onClick={toggleItalic} 
+                style={{ 
+                  width: '38px', height: '38px', 
+                  borderRadius: 'var(--r-sm)', border: '2.5px solid var(--border)', 
+                  background: isItalic ? 'var(--teal-light)' : 'var(--white)', 
+                  color: isItalic ? 'white' : 'var(--dark)',
+                  fontWeight: 900, fontStyle: 'italic', cursor: 'pointer' 
+                }}>I</button>
+            </div>
             <FL t="Alignment" />
             <select className="input-text" value={align}
               onChange={(e) => setAlign(Number(e.target.value))}
@@ -147,6 +221,20 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                 marginBottom: '6px',
               }}>{label}</div>
             ))}
+          </Card>
+          <hr className="divider" />
+          <Card accent="var(--teal)">
+            <div style={{ fontWeight: 900, fontSize: '0.88rem', marginBottom: '12px', color: 'var(--dark)' }}>
+              Insert & Draw
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+              <button className="btn btn-secondary" onClick={onInsertImage} disabled={isLoading} style={{ fontSize: '0.8rem' }}>
+                Insert Image
+              </button>
+              <button className="btn btn-secondary" onClick={onToggleDraw} disabled={isLoading} style={{ fontSize: '0.8rem', background: isDrawing ? 'var(--teal-light)' : 'var(--white)', color: isDrawing ? 'white' : 'var(--dark)' }}>
+                {isDrawing ? 'Drawing...' : 'Draw Shape'}
+              </button>
+            </div>
           </Card>
           <hr className="divider" />
           <Card accent="var(--yellow)">
