@@ -1,17 +1,5 @@
 """
-Session & version management.
-
-A *session* owns a directory on disk holding the uploaded PDF plus a stack of
-version snapshots.  Every mutating edit is applied to the current version and
-saved as a **new** snapshot, which makes undo/redo a simple index move and
-guarantees a crash never leaves a half-written document as "current".
-
-Concurrency: each session carries its own ``threading.Lock`` so two requests for
-the same document can't corrupt its content stream; PyMuPDF work runs in a
-thread-pool (see routers), so plain threading locks are the right primitive.
-
-Durability: a ``manifest.json`` per session means sessions (and their full undo
-history) survive a server restart — fixing the original in-memory-only design.
+Session and version management for PDFs plus editor overlay objects.
 """
 from __future__ import annotations
 
@@ -22,18 +10,22 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Tuple
 
 import fitz
 
 from config import settings
 from logging_config import get_logger
-from pdf_engine import extract_pdf_data
+from pdf_engine import extract_pdf_data, flatten_objects
 
 log = get_logger("sessions")
 
 MANIFEST = "manifest.json"
 VERSIONS_DIR = "versions"
+OBJECT_VERSIONS_DIR = "object_versions"
+ASSETS_DIR = "assets"
+EXPORTS_DIR = "exports"
 
 
 @dataclass
@@ -41,7 +33,8 @@ class Session:
     session_id: str
     filename: str
     directory: str
-    versions: List[str] = field(default_factory=list)  # absolute paths, oldest -> newest
+    versions: List[str] = field(default_factory=list)
+    object_versions: List[str] = field(default_factory=list)
     index: int = 0
     created: float = field(default_factory=lambda: 0.0)
     updated: float = field(default_factory=lambda: 0.0)
@@ -50,6 +43,10 @@ class Session:
     @property
     def current_path(self) -> str:
         return self.versions[self.index]
+
+    @property
+    def current_objects_path(self) -> str:
+        return self.object_versions[self.index]
 
     @property
     def can_undo(self) -> bool:
@@ -67,7 +64,6 @@ class Session:
             "total_versions": len(self.versions),
         }
 
-    # -- persistence -------------------------------------------------------- #
     def _manifest_path(self) -> str:
         return os.path.join(self.directory, MANIFEST)
 
@@ -76,6 +72,7 @@ class Session:
             "session_id": self.session_id,
             "filename": self.filename,
             "versions": [os.path.basename(v) for v in self.versions],
+            "object_versions": [os.path.basename(v) for v in self.object_versions],
             "index": self.index,
             "created": self.created,
             "updated": self.updated,
@@ -83,7 +80,7 @@ class Session:
         tmp = self._manifest_path() + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
-        os.replace(tmp, self._manifest_path())  # atomic on POSIX & Windows
+        os.replace(tmp, self._manifest_path())
 
 
 class SessionError(Exception):
@@ -95,18 +92,12 @@ class SessionManager:
         self._sessions: Dict[str, Session] = {}
         self._global_lock = threading.Lock()
         self._now = now
-        # Never let storage setup crash the process at import time (e.g. a
-        # read-only FS on misconfigured serverless): degrade to empty state and
-        # surface a clean error later when an upload actually needs the dir.
         try:
             os.makedirs(settings.temp_dir, exist_ok=True)
             self._load_existing()
         except OSError as exc:
             log.error("Could not initialise session storage at %s: %s", settings.temp_dir, exc)
 
-    # ------------------------------------------------------------------ #
-    #  Lifecycle
-    # ------------------------------------------------------------------ #
     def _load_existing(self) -> None:
         for name in os.listdir(settings.temp_dir):
             directory = os.path.join(settings.temp_dir, name)
@@ -120,11 +111,13 @@ class SessionManager:
                 versions = [os.path.join(vdir, v) for v in data["versions"]]
                 if not all(os.path.isfile(v) for v in versions):
                     raise FileNotFoundError("missing version file")
+                object_versions = self._load_object_versions(directory, versions, data.get("object_versions"))
                 self._sessions[data["session_id"]] = Session(
                     session_id=data["session_id"],
                     filename=data["filename"],
                     directory=directory,
                     versions=versions,
+                    object_versions=object_versions,
                     index=data["index"],
                     created=data.get("created", self._now()),
                     updated=data.get("updated", self._now()),
@@ -138,11 +131,17 @@ class SessionManager:
         session_id = str(uuid.uuid4())
         directory = os.path.join(settings.temp_dir, session_id)
         vdir = os.path.join(directory, VERSIONS_DIR)
+        odir = os.path.join(directory, OBJECT_VERSIONS_DIR)
         os.makedirs(vdir, exist_ok=True)
+        os.makedirs(odir, exist_ok=True)
+        os.makedirs(os.path.join(directory, ASSETS_DIR), exist_ok=True)
+        os.makedirs(os.path.join(directory, EXPORTS_DIR), exist_ok=True)
 
         v0 = os.path.join(vdir, "0000.pdf")
+        o0 = os.path.join(odir, "0000.json")
         with open(v0, "wb") as fh:
             fh.write(file_bytes)
+        self._write_objects(o0, [])
 
         now = self._now()
         sess = Session(
@@ -150,6 +149,7 @@ class SessionManager:
             filename=filename,
             directory=directory,
             versions=[v0],
+            object_versions=[o0],
             index=0,
             created=now,
             updated=now,
@@ -171,25 +171,35 @@ class SessionManager:
         if sess and os.path.isdir(sess.directory):
             shutil.rmtree(sess.directory, ignore_errors=True)
 
-    # ------------------------------------------------------------------ #
-    #  Edits & history
-    # ------------------------------------------------------------------ #
-    def mutate(self, session_id: str, mutator: Callable[["fitz.Document"], object]) -> Tuple[Session, object]:
-        """Open current version, run ``mutator(doc)``, save the result as a new
-        version, and advance the history pointer.  Returns ``(session, result)``.
-
-        The mutator may raise — in that case nothing is committed.
-        """
+    def mutate(self, session_id: str, mutator: Callable[[fitz.Document], object]) -> Tuple[Session, object]:
         sess = self.get(session_id)
         with sess.lock:
             doc = fitz.open(sess.current_path)
             try:
                 result = mutator(doc)
                 new_path = self._next_version_path(sess)
+                new_objects_path = self._next_object_version_path(sess)
                 doc.save(new_path, garbage=4, deflate=True)
+                self._clone_objects(sess.current_objects_path, new_objects_path)
             finally:
                 doc.close()
-            self._commit_version(sess, new_path)
+            self._commit_version(sess, new_path, new_objects_path)
+            return sess, result
+
+    def mutate_objects(
+        self,
+        session_id: str,
+        mutator: Callable[[List[Dict[str, Any]]], object],
+    ) -> Tuple[Session, object]:
+        sess = self.get(session_id)
+        with sess.lock:
+            objects = self._read_objects(sess.current_objects_path)
+            result = mutator(objects)
+            new_path = self._next_version_path(sess)
+            new_objects_path = self._next_object_version_path(sess)
+            shutil.copyfile(sess.current_path, new_path)
+            self._write_objects(new_objects_path, objects)
+            self._commit_version(sess, new_path, new_objects_path)
             return sess, result
 
     def undo(self, session_id: str) -> Session:
@@ -217,38 +227,93 @@ class SessionManager:
         with sess.lock:
             doc = fitz.open(sess.current_path)
             try:
-                return extract_pdf_data(doc)
+                data = extract_pdf_data(doc)
+            finally:
+                doc.close()
+            objects = self._read_objects(sess.current_objects_path)
+            grouped: Dict[int, List[Dict[str, Any]]] = {}
+            for obj in objects:
+                grouped.setdefault(int(obj["page_number"]), []).append(obj)
+            for page in data["pages"]:
+                page["objects"] = sorted(grouped.get(page["number"], []), key=lambda item: item.get("z_index", 0))
+            return data
+
+    def load_objects(self, session_id: str) -> List[Dict[str, Any]]:
+        sess = self.get(session_id)
+        with sess.lock:
+            return self._read_objects(sess.current_objects_path)
+
+    def store_asset(self, session_id: str, filename: str, data: bytes) -> str:
+        sess = self.get(session_id)
+        ext = Path(filename or "").suffix.lower() or ".bin"
+        asset_id = f"{uuid.uuid4().hex}{ext}"
+        path = os.path.join(sess.directory, ASSETS_DIR, asset_id)
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return asset_id
+
+    def asset_path(self, session_id: str, asset_id: str) -> str:
+        sess = self.get(session_id)
+        return self._asset_path_for_session(sess, asset_id)
+
+    def flatten(self, session_id: str) -> Session:
+        sess = self.get(session_id)
+        with sess.lock:
+            objects = self._read_objects(sess.current_objects_path)
+            if not objects:
+                return sess
+            doc = fitz.open(sess.current_path)
+            try:
+                flatten_objects(doc, objects, lambda asset_id: self._asset_path_for_session(sess, asset_id))
+                new_path = self._next_version_path(sess)
+                new_objects_path = self._next_object_version_path(sess)
+                doc.save(new_path, garbage=4, deflate=True)
+                self._write_objects(new_objects_path, [])
+            finally:
+                doc.close()
+            self._commit_version(sess, new_path, new_objects_path)
+            return sess
+
+    def export_path(self, session_id: str) -> str:
+        sess = self.get(session_id)
+        with sess.lock:
+            objects = self._read_objects(sess.current_objects_path)
+            if not objects:
+                return sess.current_path
+            doc = fitz.open(sess.current_path)
+            try:
+                flatten_objects(doc, objects, lambda asset_id: self._asset_path_for_session(sess, asset_id))
+                export_path = os.path.join(sess.directory, EXPORTS_DIR, f"download-{sess.index:04d}.pdf")
+                doc.save(export_path, garbage=4, deflate=True)
+                return export_path
             finally:
                 doc.close()
 
-    # ------------------------------------------------------------------ #
-    #  internals
-    # ------------------------------------------------------------------ #
     def _next_version_path(self, sess: Session) -> str:
-        # next sequential filename (independent of any trimmed redo tail)
         existing = [int(os.path.splitext(os.path.basename(v))[0]) for v in sess.versions]
         n = (max(existing) + 1) if existing else 0
         return os.path.join(sess.directory, VERSIONS_DIR, f"{n:04d}.pdf")
 
-    def _commit_version(self, sess: Session, new_path: str) -> None:
-        # Drop any redo tail — a fresh edit forks history.
-        for stale in sess.versions[sess.index + 1:]:
-            try:
-                os.remove(stale)
-            except OSError:
-                pass
+    def _next_object_version_path(self, sess: Session) -> str:
+        existing = [int(os.path.splitext(os.path.basename(v))[0]) for v in sess.object_versions]
+        n = (max(existing) + 1) if existing else 0
+        return os.path.join(sess.directory, OBJECT_VERSIONS_DIR, f"{n:04d}.json")
+
+    def _commit_version(self, sess: Session, new_path: str, new_objects_path: str) -> None:
+        for stale_pdf, stale_objects in zip(sess.versions[sess.index + 1 :], sess.object_versions[sess.index + 1 :]):
+            self._remove_path(stale_pdf)
+            self._remove_path(stale_objects)
         sess.versions = sess.versions[: sess.index + 1] + [new_path]
+        sess.object_versions = sess.object_versions[: sess.index + 1] + [new_objects_path]
         sess.index = len(sess.versions) - 1
 
-        # Enforce history cap by trimming the oldest snapshots.
         overflow = len(sess.versions) - settings.max_history_versions
         if overflow > 0:
-            for stale in sess.versions[:overflow]:
-                try:
-                    os.remove(stale)
-                except OSError:
-                    pass
+            for stale_pdf, stale_objects in zip(sess.versions[:overflow], sess.object_versions[:overflow]):
+                self._remove_path(stale_pdf)
+                self._remove_path(stale_objects)
             sess.versions = sess.versions[overflow:]
+            sess.object_versions = sess.object_versions[overflow:]
             sess.index -= overflow
 
         sess.updated = self._now()
@@ -262,3 +327,56 @@ class SessionManager:
             log.info("Purging expired session %s", sid)
             self.delete(sid)
         return len(expired)
+
+    def _load_object_versions(
+        self,
+        directory: str,
+        versions: List[str],
+        raw_object_versions: List[str] | None,
+    ) -> List[str]:
+        odir = os.path.join(directory, OBJECT_VERSIONS_DIR)
+        os.makedirs(odir, exist_ok=True)
+        if raw_object_versions:
+            object_versions = [os.path.join(odir, name) for name in raw_object_versions]
+            if not all(os.path.isfile(path) for path in object_versions):
+                raise FileNotFoundError("missing object version file")
+            if len(object_versions) != len(versions):
+                raise ValueError("object version history length mismatch")
+            return object_versions
+
+        object_versions: List[str] = []
+        for version in versions:
+            base = os.path.splitext(os.path.basename(version))[0]
+            path = os.path.join(odir, f"{base}.json")
+            if not os.path.isfile(path):
+                self._write_objects(path, [])
+            object_versions.append(path)
+        return object_versions
+
+    def _clone_objects(self, source: str, target: str) -> None:
+        self._write_objects(target, self._read_objects(source))
+
+    def _read_objects(self, path: str) -> List[Dict[str, Any]]:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, list):
+            raise ValueError("object version must contain a list")
+        return [dict(item) for item in data]
+
+    def _write_objects(self, path: str, objects: List[Dict[str, Any]]) -> None:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(objects, fh)
+        os.replace(tmp, path)
+
+    def _asset_path_for_session(self, sess: Session, asset_id: str) -> str:
+        target = os.path.join(sess.directory, ASSETS_DIR, asset_id)
+        if not os.path.isfile(target):
+            raise SessionError("Asset not found")
+        return target
+
+    def _remove_path(self, path: str) -> None:
+        try:
+            os.remove(path)
+        except OSError:
+            pass

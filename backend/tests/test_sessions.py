@@ -75,8 +75,35 @@ def test_persistence_survives_new_manager(manager, tmp_path, monkeypatch):
     restored = reborn.get(sid)
     assert restored.can_undo is True
     assert restored.filename == "doc.pdf"
+    assert len(restored.object_versions) == len(restored.versions)
 
 
 def test_missing_session_raises(manager):
     with pytest.raises(SessionError):
         manager.get("nope")
+
+
+def test_mutate_objects_roundtrip_and_extract(manager):
+    sess = manager.create(_pdf_bytes("Draft"), "doc.pdf")
+
+    def _mutate(objects):
+        objects.append(
+            {
+                "id": "obj-1",
+                "page_number": 1,
+                "type": "text",
+                "bbox": [20, 20, 140, 60],
+                "text": "Overlay",
+                "font_family": "Inter",
+                "font_size": 14,
+                "color": "#000000",
+                "align": "left",
+                "z_index": 0,
+            }
+        )
+
+    manager.mutate_objects(sess.session_id, _mutate)
+    data = manager.extract(sess.session_id)
+    assert data["pages"][0]["objects"][0]["text"] == "Overlay"
+    manager.undo(sess.session_id)
+    assert manager.extract(sess.session_id)["pages"][0]["objects"] == []

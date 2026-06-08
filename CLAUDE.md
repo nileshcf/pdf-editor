@@ -1,18 +1,23 @@
 # CLAUDE.md - AeroPDF Contributor Guide
 
-This file is the fast orientation guide for AI coding agents and human maintainers working in this repository.
+This is the fast orientation guide for maintainers and coding agents working in this repository.
 
-## Project Summary
+## Product Summary
 
-AeroPDF is an anonymous browser-based PDF editor.
+AeroPDF is a browser-based PDF editor with two editing models:
 
-- Backend: FastAPI + PyMuPDF.
-- Frontend: React + TypeScript + Vite + PDF.js + Tesseract.js.
-- Storage model: local session directories with versioned PDF snapshots.
-- Editing model: all mutations create a new PDF version and return fresh page metadata.
-- Deployment model: frontend on Vercel, backend on Render, Docker for self-hosting.
+- direct editing of existing PDF text
+- editable overlay objects for newly added content
 
-There is no database yet. Do not add one unless the feature requires accounts, saved documents, team workspaces, audit logs, or durable storage across backend restarts.
+Current overlay objects:
+
+- text
+- comment
+- signature
+- image
+- shape (`rect`, `circle`, `line`, `arrow`)
+
+Undo/redo spans both models because session history versions the PDF snapshot and object snapshot together.
 
 ## First Commands
 
@@ -29,18 +34,18 @@ cd backend
 python -m pytest
 ```
 
+Frontend type check:
+
+```bash
+cd frontend
+npx tsc --noEmit
+```
+
 Frontend build:
 
 ```bash
 cd frontend
 npm run build
-```
-
-Frontend type check only:
-
-```bash
-cd frontend
-npx tsc --noEmit
 ```
 
 ## Repository Map
@@ -49,228 +54,184 @@ npx tsc --noEmit
 backend/
   main.py                FastAPI app assembly
   config.py              AEROPDF_* settings
-  deps.py                shared SessionManager and response helper
+  deps.py                shared SessionManager and response builder
   logging_config.py      logging setup
-  schemas.py             Pydantic API contracts
-  sessions.py            session directories, manifests, version stack, locks
-  pdf_engine.py          pure PDF extraction and mutation logic
+  schemas.py             request/response and object models
+  sessions.py            PDF/object version history, manifests, assets, exports
+  pdf_engine.py          pure PDF extraction/mutation/flatten logic
   commands.py            deterministic command parser
   routers/
     documents.py         upload, download, delete session
-    editing.py           replace, edit block, OCR persistence, commands, undo/redo
+    editing.py           replace, edit block, OCR, commands, undo/redo
     pages.py             rotate, delete, reorder, duplicate, insert blank
-    annotations.py       image, shape, highlight operations
+    annotations.py       compatibility routes for shape/image object creation, highlight
+    objects.py           object CRUD, reorder, flatten, asset serving
   tests/
     test_engine.py
     test_sessions.py
     test_schemas.py
 
 frontend/
-  src/api.ts             API client and shared response types
-  src/App.tsx            top-level state and mutation handlers
-  src/index.css          global theme and layout
+  src/api.ts             API client and shared types
+  src/App.tsx            top-level editor state and mutation handlers
+  src/index.css          layout and visual system
   src/components/
-    PDFCanvas.tsx        PDF render, overlays, OCR, drawing gestures
-    Sidebar.tsx          page thumbnails
-    PropertiesPanel.tsx  text editing and tool entry points
-    PageToolbar.tsx      page operations
-    ShapeToolbar.tsx     drawing controls
+    AeroLogo.tsx         product mark
+    PDFCanvas.tsx        PDF canvas, text hitboxes, object layer, OCR, drag interactions
+    Sidebar.tsx          page previews
+    PropertiesPanel.tsx  contextual inspector
     ImageInsertModal.tsx image placement form
-    CommandConsole.tsx   command bar
 ```
 
-## Non-Negotiable Architecture Rules
+## Core Architecture Rules
 
-- Keep PDF mutation in `backend/pdf_engine.py`.
-- Keep PDF file opening, saving, locking, manifest persistence, undo, and redo in `SessionManager`.
-- Engine functions must accept an already-open `fitz.Document`; do not make them open/save files directly.
-- Every mutating API route should use `session_manager.mutate`.
-- Every mutating API route should return `EditResponse`.
-- Validate inputs before committing a new version: page numbers, bboxes, dimensions, file type, file size, colors, and line widths.
+- Keep PDF mutation logic in `backend/pdf_engine.py`.
+- Keep file opening, saving, versioning, object snapshotting, and locking in `SessionManager`.
+- Engine functions must operate on an already-open `fitz.Document`.
+- PDF mutations must go through `session_manager.mutate(...)`.
+- Object metadata mutations must go through `session_manager.mutate_objects(...)`.
+- Mutating routes should return `EditResponse`.
+- Validate page numbers, bboxes, dimensions, colors, and file inputs before committing history.
 - Keep frontend API calls centralized in `frontend/src/api.ts`.
-- After a successful mutation, frontend state should flow through `App.applyEdit`.
+- After successful API edits, frontend state should refresh from the returned `pages` tree, not manual local patching.
 
-## Backend Flow
+## Session Model
 
-Upload:
+Every session stores:
 
-```text
-POST /api/upload
-  -> validate PDF bytes
-  -> SessionManager.create
-  -> SessionManager.extract
-  -> UploadResponse
-```
+- versioned PDFs in `versions/`
+- versioned object JSON snapshots in `object_versions/`
+- image assets in `assets/`
+- temporary flattened downloads in `exports/`
 
-Mutation:
+The PDF version index and object version index are intentionally aligned.
 
-```text
-route handler
-  -> Pydantic request validation
-  -> get_session_or_404
-  -> session_manager.mutate(session_id, mutator)
-  -> pdf_engine mutates open fitz.Document
-  -> SessionManager saves next version
-  -> build_edit_response
-```
+Implication:
 
-Undo/redo:
+- undo/redo restores both PDF content and overlay objects together
+- object-only edits still create a new history entry
+- PDF-only edits clone the current object snapshot forward
 
-```text
-POST /api/undo/{session_id}
-POST /api/redo/{session_id}
-  -> move version index
-  -> save manifest
-  -> return fresh extracted pages
-```
+Do not split history into separate PDF and object undo stacks.
 
-## Frontend Flow
+## Editing Model
 
-Top-level state lives in `App.tsx`:
+### Existing PDF Content
 
-- `session`: active document metadata and page tree.
-- `history`: undo/redo state and version number.
-- `activePage`: one-based page index.
-- `selectedBlock`: currently selected text span.
-- `activeShape`: current drawing tool.
-- `isLoading`: blocks concurrent mutation calls.
+These flows mutate the actual PDF immediately:
 
-Rendering:
+- replace text
+- block edit
+- OCR persistence
+- page operations
+- highlight annotation
 
-- `PDFCanvas.tsx` renders the current PDF page with PDF.js.
-- Text spans are transparent absolutely-positioned overlay divs.
-- Canvas refresh uses `docVersion` as a cache buster.
-- PDF.js worker is bundled from `pdfjs-dist`; do not switch back to a CDN worker.
+### Overlay Objects
 
-Editing:
+These flows mutate object metadata first:
 
-- Double-click a span to select it.
-- `PropertiesPanel` edits text and calls `api.editBlock`.
-- Find/replace calls `api.replace`.
-- Page toolbar calls `api.rotate`, `api.duplicate`, `api.insertBlank`, and `api.deletePages`.
-- OCR runs locally with Tesseract, then persists through `api.persistOcr`.
-- Image and shape tools call annotation endpoints.
+- add image
+- draw shape
+- create text/comment/signature object
+- move object
+- edit object properties
+- reorder or delete object
 
-## API Contract
+Overlay objects are flattened into the PDF:
 
-All mutating endpoints return:
+- on explicit `POST /api/flatten/{session_id}`
+- on `GET /api/download/{session_id}` if pending objects exist
 
-```ts
-interface EditResponse {
-  success: boolean;
-  message?: string;
-  pages: PDFPage[];
-  metadata: { title: string; author: string; pages: number };
-  history: {
-    can_undo: boolean;
-    can_redo: boolean;
-    version: number;
-    total_versions: number;
-  };
-  replacements_made?: number;
-  warnings?: string[];
-}
-```
+## Frontend State
 
-Important endpoints:
+`App.tsx` currently owns:
 
-- `POST /api/upload`
-- `GET /api/download/{session_id}`
-- `POST /api/replace/{session_id}`
-- `POST /api/edit-block/{session_id}`
-- `POST /api/ocr/{session_id}`
-- `POST /api/command/{session_id}`
-- `POST /api/undo/{session_id}`
-- `POST /api/redo/{session_id}`
-- `POST /api/pages/*`
-- `POST /api/add-image/{session_id}`
-- `POST /api/draw-shape/{session_id}`
-- `POST /api/add-highlight/{session_id}`
+- `session`
+- `history`
+- `activePage`
+- `selectedBlock`
+- `selectedObjectId`
+- `activeTool`
+- `activeShape`
+- inspector state entry points
 
-## PDF Editing Details
+`PDFCanvas.tsx` is responsible for:
 
-Text replace:
+- PDF.js rendering
+- extracted span hitboxes
+- overlay object rendering
+- object dragging
+- text/comment/signature click-to-create
+- shape drag-to-create
+- OCR worker flow
 
-- `replace_text` delegates to `replace_on_page`.
-- Redaction annotations are added for all matches first.
-- `page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)` is called once.
-- Replacement text is inserted with captured style/baseline where possible.
+`PropertiesPanel.tsx` is the contextual inspector for:
 
-Block edit:
+- page actions
+- extracted PDF text block editing
+- overlay object transform/content/appearance editing
+- export and flatten actions
 
-- `edit_block` redacts the original rectangle.
-- Background fill is sampled from the page.
-- Font is resolved to a base-14 PDF font.
-- Text is inserted with `insert_textbox`.
-- Font size auto-shrinks to avoid silent clipping.
+## Current API Areas
 
-OCR:
+Main routes:
 
-- Tesseract returns canvas-pixel bboxes.
-- Frontend maps them to PDF points.
-- `POST /api/ocr/{session_id}` inserts text boxes into the PDF.
-- OCR is now part of version history and export.
+- `/api/upload`
+- `/api/download/{session_id}`
+- `/api/session/{session_id}`
+- `/api/replace/{session_id}`
+- `/api/edit-block/{session_id}`
+- `/api/ocr/{session_id}`
+- `/api/command/{session_id}`
+- `/api/undo/{session_id}`
+- `/api/redo/{session_id}`
+- `/api/pages/*`
+- `/api/add-image/{session_id}`
+- `/api/draw-shape/{session_id}`
+- `/api/add-highlight/{session_id}`
+- `/api/objects/{session_id}`
+- `/api/objects/{session_id}/{object_id}`
+- `/api/objects/{session_id}/reorder`
+- `/api/flatten/{session_id}`
+- `/api/assets/{session_id}/{asset_id}`
 
-Annotations:
+## Current Known Limitations
 
-- `insert_image` validates positive dimensions and page bounds.
-- `draw_shape` supports `rect`, `circle`, `line`, and `arrow`.
-- `add_highlight` validates the bbox and page bounds.
-- Images larger than 10 MB are rejected by the route.
-
-## Current Limitations
-
-- Inserted shapes/images are not yet selectable/editable after commit.
-- OCR does not store confidence or expose a review queue.
-- Zoom is fixed at `SCALE = 1.25` in `PDFCanvas.tsx`.
-- No authentication, database, team workspace, audit log, or durable cloud storage.
-- Free-tier backend restarts can remove local sessions unless persistent disk is configured.
+- Resize is currently inspector-driven, not drag-handle resize.
+- Rotation is not yet wired through the frontend interaction model.
+- Existing embedded PDF graphics are not reverse-mapped into editable overlay objects.
+- Zoom is still fixed at `SCALE = 1.25`.
+- There is no auth, durable document library, team model, or audit trail.
 
 ## Good Next Changes
 
-- Add object selection for images/shapes with move, resize, restyle, and delete.
-- Add drag-and-drop page reorder in the sidebar.
-- Add merge PDF, split PDF, and extract selected pages.
-- Add zoom controls with a single shared scale state.
-- Add Playwright smoke tests for upload, edit, OCR, undo/redo, shape, image, and export.
-- Add structured frontend types for spans, blocks, images, and shapes to remove `any`.
+- Add drag-handle resize and rotation.
+- Add zoom controls and fit modes.
+- Add page drag reorder in the sidebar UI.
+- Add merge, split, and extract operations.
+- Add Playwright smoke coverage for object create/edit/move/flatten/export.
+- Reduce `any` usage in frontend page/span typing.
 
-## Common Pitfalls
+## Pitfalls
 
-- Do not call `apply_redactions` inside a per-span loop.
-- Do not bypass `SessionManager.mutate` for a PDF edit.
-- Do not mutate frontend session pages manually after an API edit; use `applyEdit`.
-- Do not assume a static download URL means the canvas will refresh; keep the `docVersion` cache buster.
-- Do not use `cwd` in GitHub Actions. Use `working-directory`.
-- Do not add a DB for the current anonymous editing flow unless the product requirement has changed.
-
-## CI Expectations
-
-The workflow at `.github/workflows/ci.yml` should remain simple and reliable:
-
-- Backend job installs `backend/requirements.txt` and runs `python -m pytest`.
-- Frontend job runs `npm ci` and `npm run build` from `frontend/`.
-- CI runs on push and pull request to `main`.
-
-Avoid adding a linter unless the repo has a real config and the current code passes it locally.
+- Do not bypass `SessionManager` for any history-changing operation.
+- Do not write object state directly into the frontend only; persist it through the API.
+- Do not make `download` serve stale unflattened PDFs when overlay objects exist.
+- Do not reintroduce a CDN PDF.js worker.
+- Do not add a database for the current anonymous session flow unless the product requirement actually changes.
 
 ## Deployment Notes
 
-Render backend:
+Current deployment is still:
 
-- `render.yaml`
-- root directory `backend`
-- health check `/api/health`
-- required CORS env var: `AEROPDF_ALLOWED_ORIGINS`
+- frontend on Vercel
+- backend on Render
 
-Vercel frontend:
+That is fine for the current feature phase.
 
-- `vercel.json`
-- build output `frontend/dist`
-- required production env var: `VITE_API_BASE`
+Important constraint:
 
-Docker:
+- sessions and object assets live on backend disk
+- on free-tier hosts without persistent storage, sessions can disappear on restart or redeploy
 
-```bash
-docker-compose up --build
-```
+Do not design features that assume durable storage unless deployment changes with them.

@@ -195,3 +195,39 @@ def test_insert_image_rejects_outside_page():
     with pytest.raises(ValueError):
         engine.insert_image(doc, 1, png, [180, 180, 260, 260])
     doc.close()
+
+
+def test_flatten_objects_writes_text_and_shape():
+    doc = fitz.open()
+    doc.new_page(width=300, height=200)
+    engine.flatten_objects(
+        doc,
+        [
+            {
+                "id": "shape-1",
+                "page_number": 1,
+                "type": "shape",
+                "bbox": [20, 20, 120, 80],
+                "shape_type": "rect",
+                "stroke_color": "#000000",
+                "fill_color": "#ff0000",
+                "line_width": 2,
+                "z_index": 0,
+            },
+            {
+                "id": "text-1",
+                "page_number": 1,
+                "type": "text",
+                "bbox": [30, 100, 220, 140],
+                "text": "Overlay text",
+                "font_family": "Inter",
+                "font_size": 14,
+                "color": "#000000",
+                "align": "left",
+                "z_index": 1,
+            },
+        ],
+        lambda _: "",
+    )
+    assert "Overlay text" in doc[0].get_text()
+    doc.close()

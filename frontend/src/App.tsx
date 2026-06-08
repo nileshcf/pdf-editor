@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -21,7 +21,17 @@ import { Sidebar } from './components/Sidebar';
 import { PDFCanvas } from './components/PDFCanvas';
 import { PropertiesPanel } from './components/PropertiesPanel';
 import { ImageInsertModal } from './components/ImageInsertModal';
-import { api, EditResponse, HistoryState, OCRBlockPayload, PDFPage } from './api';
+import { AeroLogo } from './components/AeroLogo';
+import {
+  api,
+  EditResponse,
+  EditorObject,
+  HistoryState,
+  OCRBlockPayload,
+  PDFPage,
+  ShapeObjectType,
+  UpdateObjectPayload,
+} from './api';
 
 type ToolKey = 'cursor' | 'text' | 'image' | 'draw' | 'signature' | 'comment';
 
@@ -53,6 +63,7 @@ const MOCK_PAGES: PDFPage[] = [1, 2, 3, 4].map((n) => ({
   height: 842,
   blocks: [],
   images: [],
+  objects: [],
 }));
 
 const TOOL_LIST: Array<{ key: ToolKey; icon: React.ReactNode; label: string }> = [
@@ -69,11 +80,12 @@ function App() {
   const [history, setHistory] = useState<HistoryState | null>(null);
   const [activePage, setActivePage] = useState<number>(1);
   const [selectedBlock, setSelectedBlock] = useState<SelectedBlock | null>(null);
+  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [toast, setToast] = useState<Toast>({ text: '', type: null });
   const [activeTool, setActiveTool] = useState<ToolKey>('text');
   const [showImageModal, setShowImageModal] = useState(false);
-  const [activeShape, setActiveShape] = useState<'rect' | 'circle' | 'line' | 'arrow' | null>(null);
+  const [activeShape, setActiveShape] = useState<ShapeObjectType>('rect');
   const [strokeColor, setStrokeColor] = useState('#000000');
   const [fillColor, setFillColor] = useState('#ffffff');
   const [lineWidth, setLineWidth] = useState(2);
@@ -88,35 +100,78 @@ function App() {
   const displayPages = session?.pages ?? MOCK_PAGES;
   const displayedFilename = session?.filename || 'annual_report_draft.pdf';
   const sid = session?.session_id;
+  const activePageData = displayPages[Math.max(0, activePage - 1)];
+
+  const selectedObject = useMemo<EditorObject | null>(() => {
+    if (!session || !selectedObjectId) return null;
+    for (const page of session.pages) {
+      const found = page.objects?.find((obj) => obj.id === selectedObjectId);
+      if (found) return found;
+    }
+    return null;
+  }, [session, selectedObjectId]);
 
   useEffect(() => {
     const maxPage = displayPages.length;
     setActivePage((current) => Math.min(Math.max(1, current), maxPage));
   }, [displayPages.length]);
 
-  const applyEdit = useCallback(
-    (data: EditResponse, fallbackMsg?: string) => {
+  const syncEdit = useCallback(
+    (
+      data: EditResponse,
+      options?: {
+        keepObjectSelection?: boolean;
+        selectObjectId?: string | null;
+        clearBlock?: boolean;
+      }
+    ) => {
       setSession((prev) => (prev ? { ...prev, pages: data.pages, metadata: data.metadata } : prev));
       setHistory(data.history);
-      setSelectedBlock(null);
-      const total = data.metadata.pages;
-      setActivePage((p) => Math.min(Math.max(1, p), total));
+      setActivePage((p) => Math.min(Math.max(1, p), data.metadata.pages));
+      if (options?.clearBlock !== false) {
+        setSelectedBlock(null);
+      }
+      setSelectedObjectId((current) => {
+        if (options && 'selectObjectId' in options) {
+          return options.selectObjectId ?? null;
+        }
+        if (options?.keepObjectSelection && current) {
+          const exists = data.pages.some((page) => page.objects?.some((obj) => obj.id === current));
+          return exists ? current : null;
+        }
+        return null;
+      });
+    },
+    []
+  );
+
+  const applyEdit = useCallback(
+    (
+      data: EditResponse,
+      fallbackMsg?: string,
+      options?: { keepObjectSelection?: boolean; selectObjectId?: string | null; clearBlock?: boolean }
+    ) => {
+      syncEdit(data, options);
       if (data.warnings?.length) {
         showToast(data.warnings[0], 'info');
       } else {
         showToast(data.message || fallbackMsg || 'Done', 'success');
       }
     },
-    [showToast]
+    [showToast, syncEdit]
   );
 
   const run = useCallback(
-    async (fn: () => Promise<EditResponse>, fallbackMsg?: string) => {
+    async (
+      fn: () => Promise<EditResponse>,
+      fallbackMsg?: string,
+      options?: { keepObjectSelection?: boolean; selectObjectId?: string | null; clearBlock?: boolean }
+    ) => {
       if (!session) return;
       setIsLoading(true);
       try {
         const data = await fn();
-        applyEdit(data, fallbackMsg);
+        applyEdit(data, fallbackMsg, options);
       } catch (err: any) {
         showToast(err.message || 'Request failed', 'error');
       } finally {
@@ -125,6 +180,13 @@ function App() {
     },
     [session, applyEdit, showToast]
   );
+
+  const findTopObjectId = useCallback((pages: PDFPage[], pageNumber: number) => {
+    const page = pages.find((item) => item.number === pageNumber);
+    if (!page?.objects?.length) return null;
+    const ordered = [...page.objects].sort((a, b) => (a.z_index ?? 0) - (b.z_index ?? 0));
+    return ordered[ordered.length - 1]?.id ?? null;
+  }, []);
 
   const handleFileUpload = async (file: File) => {
     if (!file.name.toLowerCase().endsWith('.pdf')) {
@@ -143,6 +205,7 @@ function App() {
       setHistory(data.history);
       setActivePage(1);
       setSelectedBlock(null);
+      setSelectedObjectId(null);
       showToast(`${data.filename} loaded`, 'success');
     } catch (err: any) {
       showToast(err.message || 'Upload failed', 'error');
@@ -213,6 +276,8 @@ function App() {
     window.open(api.downloadUrl(sid), '_blank');
   };
 
+  const handleFlatten = () => sid && run(() => api.flatten(sid), 'Objects flattened into the PDF');
+
   const handleOCRComplete = async (pageNum: number, ocrBlocks: OCRBlockPayload[]) => {
     if (!sid) return;
     if (!ocrBlocks.length) {
@@ -235,7 +300,8 @@ function App() {
     setIsLoading(true);
     try {
       const data = await api.addImage(sid, file, x, y, w, h, activePage);
-      applyEdit(data, 'Image inserted');
+      const objectId = findTopObjectId(data.pages, activePage);
+      applyEdit(data, 'Image inserted', { selectObjectId: objectId });
       setShowImageModal(false);
       setActiveTool('cursor');
     } catch (err: any) {
@@ -246,7 +312,7 @@ function App() {
   };
 
   const handleDrawShape = async (bbox: number[]) => {
-    if (!sid || !activeShape) return;
+    if (!sid || activeTool !== 'draw') return;
     setIsLoading(true);
     try {
       const data = await api.drawShape(sid, {
@@ -254,11 +320,11 @@ function App() {
         shape_type: activeShape,
         bbox,
         stroke_color: strokeColor,
-        fill_color: fillColor || undefined,
+        fill_color: activeShape === 'line' || activeShape === 'arrow' ? undefined : fillColor,
         line_width: lineWidth,
       });
-      applyEdit(data, 'Shape added');
-      setActiveShape(null);
+      const objectId = findTopObjectId(data.pages, activePage);
+      applyEdit(data, 'Shape added', { selectObjectId: objectId });
       setActiveTool('cursor');
     } catch (err: any) {
       showToast(err.message || 'Shape draw failed', 'error');
@@ -267,19 +333,118 @@ function App() {
     }
   };
 
-  const onToolSelect = (tool: ToolKey) => {
-    setActiveTool(tool);
-    if (tool !== 'draw') setActiveShape(null);
-    if (tool === 'draw') setActiveShape((prev) => prev || 'rect');
-    if (tool === 'image' && session) setShowImageModal(true);
+  const handleCreateObject = async (
+    tool: Extract<ToolKey, 'text' | 'comment' | 'signature'>,
+    bbox: [number, number, number, number]
+  ) => {
+    if (!sid) return;
+    const payload =
+      tool === 'text'
+        ? {
+            page_number: activePage,
+            type: 'text' as const,
+            bbox,
+            text: 'Editable text',
+            font_family: 'Inter',
+            font_size: 16,
+            color: '#000000',
+          }
+        : tool === 'comment'
+          ? {
+              page_number: activePage,
+              type: 'comment' as const,
+              bbox,
+              text: 'Comment',
+              font_family: 'Inter',
+              font_size: 12,
+              color: '#333333',
+              stroke_color: '#d7b200',
+              fill_color: '#fff6bf',
+              line_width: 1.5,
+            }
+          : {
+              page_number: activePage,
+              type: 'signature' as const,
+              bbox,
+              text: 'Signature',
+              font_family: 'Times',
+              font_size: 20,
+              color: '#0f4f8a',
+            };
+
+    setIsLoading(true);
+    try {
+      const data = await api.createObject(sid, payload);
+      const objectId = findTopObjectId(data.pages, activePage);
+      applyEdit(data, `Added ${tool}`, { selectObjectId: objectId, clearBlock: true });
+      setActiveTool('cursor');
+    } catch (err: any) {
+      showToast(err.message || 'Object creation failed', 'error');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const activePageData = displayPages[Math.max(0, activePage - 1)];
+  const handleUpdateObject = (objectId: string, changes: UpdateObjectPayload) => {
+    if (!sid) return;
+    return run(() => api.updateObject(sid, objectId, changes), 'Object updated', {
+      keepObjectSelection: true,
+      selectObjectId: objectId,
+      clearBlock: true,
+    });
+  };
+
+  const handleDeleteObject = () => {
+    if (!sid || !selectedObjectId) return;
+    return run(() => api.deleteObject(sid, selectedObjectId), 'Object deleted', { selectObjectId: null, clearBlock: true });
+  };
+
+  const handleReorderObject = (direction: 'forward' | 'backward') => {
+    if (!sid || !selectedObject) return;
+    const page = session?.pages.find((item) => item.number === selectedObject.page_number);
+    if (!page?.objects?.length) return;
+    const ordered = [...page.objects].sort((a, b) => (a.z_index ?? 0) - (b.z_index ?? 0));
+    const index = ordered.findIndex((item) => item.id === selectedObject.id);
+    const swapIndex = direction === 'forward' ? index + 1 : index - 1;
+    if (index < 0 || swapIndex < 0 || swapIndex >= ordered.length) return;
+    [ordered[index], ordered[swapIndex]] = [ordered[swapIndex], ordered[index]];
+    run(() => api.reorderObjects(sid, ordered.map((item) => item.id)), 'Object order updated', {
+      keepObjectSelection: true,
+      clearBlock: true,
+    });
+  };
+
+  const onToolSelect = (tool: ToolKey) => {
+    setActiveTool(tool);
+    if (tool === 'draw') {
+      setActiveShape((prev) => prev || 'rect');
+    }
+    if (tool === 'image' && session) {
+      setShowImageModal(true);
+    }
+  };
+
+  const handleSelectBlock = (block: SelectedBlock | null) => {
+    setSelectedBlock(block);
+    setSelectedObjectId(null);
+    if (block) {
+      setActiveTool('text');
+    }
+  };
+
+  const handleSelectObject = (objectId: string | null) => {
+    setSelectedObjectId(objectId);
+    if (objectId) {
+      setSelectedBlock(null);
+      setActiveTool('cursor');
+    }
+  };
 
   return (
     <div className="app-shell">
       <header className="top-toolbar">
         <div className="toolbar-left">
+          <AeroLogo />
           <button className="tool-btn" title="Menu">
             <ChevronDown size={18} strokeWidth={1.5} />
           </button>
@@ -336,7 +501,12 @@ function App() {
           setActivePage={setActivePage}
         />
 
-        <main className={`editor-stage${isDragging ? ' dragging' : ''}`} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
+        <main
+          className={`editor-stage${isDragging ? ' dragging' : ''}`}
+          onDragOver={onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+        >
           {toast.text && (
             <div className={`toast${toast.type ? ` ${toast.type}` : ''}`}>
               {toast.type === 'success' ? <CheckCircle2 size={14} /> : null}
@@ -353,17 +523,27 @@ function App() {
               page={activePageData}
               pdfUrl={api.downloadUrl(session.session_id)}
               docVersion={history?.version ?? 0}
-              onSelectBlock={setSelectedBlock}
+              onSelectBlock={handleSelectBlock}
               onOCRComplete={handleOCRComplete}
               selectedBlock={selectedBlock}
+              selectedObjectId={selectedObjectId}
+              onSelectObject={handleSelectObject}
+              activeTool={activeTool}
               activeShape={activeTool === 'draw' ? activeShape : null}
               onDrawShape={handleDrawShape}
+              onCreateObject={handleCreateObject}
+              onUpdateObject={handleUpdateObject}
+              assetUrlFor={(assetId: string) => api.assetUrl(session.session_id, assetId)}
             />
           ) : (
             <button className="mock-document" onClick={openFilePicker}>
+              <div className="mock-brand">
+                <AeroLogo compact />
+                <span>Design-grade PDF editing</span>
+              </div>
               <div className="mock-title">Quarterly Revenue Summary</div>
               <div className="mock-paragraph">
-                This placeholder document mirrors the active editing surface. Open a PDF to start editing live text, images, and annotations.
+                Open a PDF to place text, images, comments, signatures, and vector shapes on a clean editing canvas.
               </div>
               <div className="mock-image" />
               <div className="mock-selection">
@@ -378,14 +558,20 @@ function App() {
 
         <PropertiesPanel
           selectedBlock={selectedBlock}
+          selectedObject={selectedObject}
           activeTool={activeTool}
+          activeShape={activeShape}
+          onChangeActiveShape={setActiveShape}
           isLoading={isLoading}
           activePage={activePage}
           onSaveBlockEdits={handleSaveBlockEdits}
+          onSaveObjectEdits={(changes) => selectedObject && handleUpdateObject(selectedObject.id, changes)}
+          onDeleteObject={handleDeleteObject}
+          onBringForward={() => handleReorderObject('forward')}
+          onSendBackward={() => handleReorderObject('backward')}
           onInsertImage={() => setShowImageModal(true)}
-          onToggleDraw={() => onToolSelect(activeTool === 'draw' ? 'cursor' : 'draw')}
-          isDrawing={activeTool === 'draw'}
           onExport={handleExportPDF}
+          onFlatten={handleFlatten}
           onRotate={handleRotate}
           onDuplicate={handleDuplicate}
           onDelete={handleDelete}
@@ -400,20 +586,10 @@ function App() {
         />
       </div>
 
-      <input
-        type="file"
-        ref={fileInputRef}
-        onChange={onFileChange}
-        accept="application/pdf"
-        style={{ display: 'none' }}
-      />
+      <input type="file" ref={fileInputRef} onChange={onFileChange} accept="application/pdf" style={{ display: 'none' }} />
 
       {showImageModal && session && (
-        <ImageInsertModal
-          onClose={() => setShowImageModal(false)}
-          onInsert={handleInsertImage}
-          isLoading={isLoading}
-        />
+        <ImageInsertModal onClose={() => setShowImageModal(false)} onInsert={handleInsertImage} isLoading={isLoading} />
       )}
     </div>
   );

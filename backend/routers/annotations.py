@@ -1,6 +1,9 @@
 """Annotations and drawing routes: add image, draw shape, add highlight."""
 from __future__ import annotations
 
+import uuid
+
+import fitz
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
@@ -12,6 +15,25 @@ from schemas import DrawShapeRequest, EditResponse, HighlightRequest
 router = APIRouter(prefix="/api", tags=["annotations"])
 log = get_logger("routers.annotations")
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def _validate_bbox(session_id: str, page_number: int, bbox: list[float], allow_line: bool = False) -> None:
+    session = session_manager.get(session_id)
+    doc = fitz.open(session.current_path)
+    try:
+        if not 1 <= page_number <= doc.page_count:
+            raise IndexError("Page number out of bounds")
+        page = doc[page_number - 1]
+        rect = fitz.Rect(bbox)
+        if allow_line:
+            if rect.x0 == rect.x1 and rect.y0 == rect.y1:
+                raise ValueError("Shape bbox must span a visible area or line")
+        elif rect.width <= 0 or rect.height <= 0:
+            raise ValueError("Shape bbox must have positive width and height")
+        if rect.x0 < page.rect.x0 or rect.y0 < page.rect.y0 or rect.x1 > page.rect.x1 or rect.y1 > page.rect.y1:
+            raise ValueError("Object bbox is outside page bounds")
+    finally:
+        doc.close()
 
 
 @router.post("/add-image/{session_id}", response_model=EditResponse)
@@ -36,43 +58,66 @@ async def add_image(
     if len(image_bytes) > _MAX_IMAGE_BYTES:
         raise HTTPException(status_code=413, detail="Image exceeds the 10 MB limit.")
 
-    def _mutate(doc):
-        engine.insert_image(
-            doc,
-            page_number,
-            image_bytes,
-            [x, y, x + width, y + height]
+    bbox = [x, y, x + width, y + height]
+
+    def _mutate(objects):
+        _validate_bbox(session_id, page_number, bbox)
+        asset_id = session_manager.store_asset(session_id, file.filename or "image", image_bytes)
+        z_index = max((int(item.get("z_index", 0)) for item in objects), default=-1) + 1
+        objects.append(
+            {
+                "id": uuid.uuid4().hex,
+                "page_number": page_number,
+                "type": "image",
+                "bbox": bbox,
+                "rotation": 0.0,
+                "opacity": 1.0,
+                "z_index": z_index,
+                "locked": False,
+                "hidden": False,
+                "asset_id": asset_id,
+            }
         )
 
     try:
-        session, _ = await run_in_threadpool(session_manager.mutate, session_id, _mutate)
+        session, _ = await run_in_threadpool(session_manager.mutate_objects, session_id, _mutate)
     except (IndexError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return await run_in_threadpool(build_edit_response, session, "Image inserted.")
+    return await run_in_threadpool(build_edit_response, session, "Image added as editable object.")
 
 
 @router.post("/draw-shape/{session_id}", response_model=EditResponse)
 async def draw_shape(session_id: str, req: DrawShapeRequest):
     get_session_or_404(session_id)
 
-    def _mutate(doc):
-        engine.draw_shape(
-            doc,
-            req.page_number,
-            req.shape_type,
-            req.bbox,
-            req.stroke_color,
-            req.fill_color,
-            req.line_width
+    def _mutate(objects):
+        _validate_bbox(session_id, req.page_number, req.bbox, allow_line=req.shape_type in {"line", "arrow"})
+        z_index = max((int(item.get("z_index", 0)) for item in objects), default=-1) + 1
+        objects.append(
+            {
+                "id": uuid.uuid4().hex,
+                "page_number": req.page_number,
+                "type": "shape",
+                "bbox": req.bbox,
+                "rotation": 0.0,
+                "opacity": 1.0,
+                "z_index": z_index,
+                "locked": False,
+                "hidden": False,
+                "shape_type": req.shape_type,
+                "stroke_color": req.stroke_color,
+                "fill_color": req.fill_color,
+                "line_width": req.line_width,
+            }
         )
 
     try:
-        session, _ = await run_in_threadpool(session_manager.mutate, session_id, _mutate)
+        session, _ = await run_in_threadpool(session_manager.mutate_objects, session_id, _mutate)
     except (IndexError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return await run_in_threadpool(build_edit_response, session, f"Drew {req.shape_type}.")
+    return await run_in_threadpool(build_edit_response, session, f"Added {req.shape_type} object.")
 
 
 @router.post("/add-highlight/{session_id}", response_model=EditResponse)

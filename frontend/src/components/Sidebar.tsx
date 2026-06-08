@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.js?url';
+import { AeroLogo } from './AeroLogo';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -10,6 +11,7 @@ interface PDFPage {
   height: number;
   blocks: any[];
   images: any[];
+  objects: any[];
 }
 
 interface SidebarProps {
@@ -34,7 +36,7 @@ const ThumbnailCanvas: React.FC<{ page: PDFPage; pdfDoc: any }> = ({ page, pdfDo
         const pdfPage = await pdfDoc.getPage(page.number);
         if (cancelled) return;
         const viewport = pdfPage.getViewport({ scale: 1 });
-        const thumbHeight = 110;
+        const thumbHeight = 126;
         const scale = thumbHeight / viewport.height;
         const scaledViewport = pdfPage.getViewport({ scale });
 
@@ -46,7 +48,7 @@ const ThumbnailCanvas: React.FC<{ page: PDFPage; pdfDoc: any }> = ({ page, pdfDo
         renderTask = pdfPage.render({ canvasContext: ctx, viewport: scaledViewport });
         await renderTask.promise;
       } catch {
-        // no-op
+        // ignore thumbnail errors
       }
     };
 
@@ -55,7 +57,7 @@ const ThumbnailCanvas: React.FC<{ page: PDFPage; pdfDoc: any }> = ({ page, pdfDo
       cancelled = true;
       renderTask?.cancel();
     };
-  }, [page, pdfDoc]);
+  }, [page.number, pdfDoc]);
 
   return <canvas ref={canvasRef} className="thumb-canvas" />;
 };
@@ -90,8 +92,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ pages, activePage, filename, p
 
   return (
     <aside className="left-panel">
-      <div className="panel-top-label" title={filename}>
-        PAGES
+      <div className="sidebar-header">
+        <AeroLogo compact />
+        <div className="panel-top-label" title={filename}>
+          PAGES
+        </div>
       </div>
       <div className="thumb-list">
         {pages.map((page) => {
@@ -103,10 +108,14 @@ export const Sidebar: React.FC<SidebarProps> = ({ pages, activePage, filename, p
               onClick={() => setActivePage(page.number)}
               title={`Page ${page.number}`}
             >
-              <div className="thumb-preview">
-                {pdfDoc ? <ThumbnailCanvas page={page} pdfDoc={pdfDoc} /> : <div className="thumb-placeholder" />}
+              <div className="thumb-sheet">
+                <div className="thumb-preview">
+                  {pdfDoc ? <ThumbnailCanvas page={page} pdfDoc={pdfDoc} /> : <div className="thumb-placeholder" />}
+                </div>
               </div>
-              <span className="thumb-index">{page.number}</span>
+              <div className="thumb-caption">
+                <span className="thumb-index">{page.number}</span>
+              </div>
             </button>
           );
         })}

@@ -68,8 +68,9 @@ async def upload_pdf(file: UploadFile = File(...)):
 async def download_file(session_id: str):
     session = get_session_or_404(session_id)
     name = session.filename if session.filename.lower().endswith(".pdf") else "edited_document.pdf"
+    path = await run_in_threadpool(session_manager.export_path, session_id)
     return FileResponse(
-        session.current_path,
+        path,
         media_type="application/pdf",
         filename=name,
         headers={"Cache-Control": "no-store"},  # always serve the latest version

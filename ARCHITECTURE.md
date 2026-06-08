@@ -1,108 +1,70 @@
 # AeroPDF Architecture
 
-This document describes how AeroPDF is structured today: its editing model, session/version storage, coordinate system, API shape, and the constraints that matter when extending the app.
+This document describes the current app architecture after the UI revamp and overlay-object implementation.
 
 ## System Overview
 
-AeroPDF has two runtime services.
+AeroPDF runs as two services:
 
 | Service | Responsibility |
 | --- | --- |
-| React/Vite frontend | Upload UI, PDF rendering with PDF.js, text/shape selection overlays, client-side OCR, user controls |
-| FastAPI backend | PDF parsing, validated PDF mutation, session/version storage, undo/redo, downloads |
+| React/Vite frontend | PDF rendering, page previews, overlay-object interaction, OCR trigger, inspector UI |
+| FastAPI backend | PDF extraction, validated mutations, session/version storage, object storage, undo/redo, export |
 
-High-level flow:
+There are now two editing surfaces in the product:
+
+1. existing PDF text content edited directly in the underlying PDF
+2. newly added editor objects stored as overlay metadata until flattened
+
+That split is deliberate. It keeps the current PyMuPDF text-edit flow working while enabling a Figma-like object editor for newly inserted elements.
+
+## High-Level Flow
 
 ```text
-PDF upload
+Upload PDF
   -> POST /api/upload
-  -> SessionManager creates session and version 0000.pdf
-  -> PyMuPDF extracts page geometry, text spans, images, metadata
-  -> frontend renders PDF canvas and overlays editable regions
+  -> SessionManager creates version 0000.pdf and 0000.json
+  -> backend extracts pages, text spans, images, metadata
+  -> frontend renders page canvas + overlays
 
-Editor mutation
-  -> frontend calls a mutating API endpoint
-  -> router validates request with Pydantic
-  -> SessionManager opens current PDF version under a per-session lock
-  -> pdf_engine mutates the open fitz.Document
-  -> SessionManager saves a new version snapshot
-  -> backend returns fresh page tree + history state
-  -> frontend re-renders canvas using docVersion cache busting
+Edit existing PDF text
+  -> POST /api/edit-block or /api/replace or /api/ocr
+  -> SessionManager.mutate(...)
+  -> pdf_engine mutates fitz.Document
+  -> SessionManager writes next PDF snapshot and clones object snapshot
+
+Edit overlay object
+  -> POST/PATCH/DELETE /api/objects/* or add-image/draw-shape
+  -> SessionManager.mutate_objects(...)
+  -> current PDF snapshot is copied forward unchanged
+  -> object metadata writes a new JSON snapshot
+
+Download / flatten
+  -> SessionManager.export_path(...) or SessionManager.flatten(...)
+  -> pdf_engine.flatten_objects(...)
+  -> overlay objects are written into a temporary or committed PDF
 ```
 
 ## Backend Modules
 
 | File | Role |
 | --- | --- |
-| `main.py` | FastAPI app assembly, middleware, health route, lifespan purge loop |
-| `config.py` | `AEROPDF_` environment settings |
-| `schemas.py` | Pydantic request and response contracts |
-| `sessions.py` | Session lifecycle, version snapshots, undo/redo, locks, manifest persistence |
+| `main.py` | FastAPI app assembly, middleware, purge loop, router wiring |
+| `config.py` | `AEROPDF_*` environment settings |
+| `schemas.py` | Request/response models, bbox validation, color validation, object schemas |
+| `sessions.py` | Session lifecycle, PDF versions, object versions, assets, undo/redo, exports |
 | `pdf_engine.py` | Stateless PDF extraction and mutation functions |
-| `commands.py` | Small command parser for the header command bar |
-| `deps.py` | Shared `SessionManager`, session lookup, `EditResponse` builder |
+| `commands.py` | Deterministic command parser |
+| `deps.py` | Shared `SessionManager`, session lookup, shared `EditResponse` builder |
 | `routers/documents.py` | Upload, download, delete session |
-| `routers/editing.py` | Replace, block edit, persisted OCR, commands, undo/redo |
+| `routers/editing.py` | Replace, block edit, OCR persistence, command, undo, redo |
 | `routers/pages.py` | Rotate, delete, reorder, duplicate, insert blank |
-| `routers/annotations.py` | Image insertion, shapes, highlights |
+| `routers/annotations.py` | Highlight annotations plus compatibility routes for image/shape object creation |
+| `routers/objects.py` | Create/update/delete/reorder/flatten overlay objects, serve assets |
 
-The important boundary is intentional: routers validate and coordinate work; `SessionManager` owns open/save/versioning; `pdf_engine.py` mutates an already-open `fitz.Document`.
+## Session Storage Model
 
-## Frontend Modules
-
-| File | Role |
-| --- | --- |
-| `src/App.tsx` | Top-level document state, active tool state, history, toasts, mutation handlers |
-| `src/api.ts` | Typed API client and `VITE_API_BASE` resolution |
-| `src/components/PDFCanvas.tsx` | PDF.js rendering, text overlays, OCR, shape drawing gestures |
-| `src/components/Sidebar.tsx` | Page list and thumbnails |
-| `src/components/PropertiesPanel.tsx` | Text editing, find/replace, insert/draw entry points |
-| `src/components/PageToolbar.tsx` | Page-level commands |
-| `src/components/ShapeToolbar.tsx` | Active shape, stroke, fill, line width controls |
-| `src/components/ImageInsertModal.tsx` | Image file and placement form |
-| `src/components/CommandConsole.tsx` | Command bar input |
-
-PDF.js worker code is bundled from `pdfjs-dist`; it is not loaded from a CDN.
-
-## Coordinate Model
-
-PyMuPDF and the browser overlay both use a top-left origin for the extracted text geometry. The app therefore does not flip Y coordinates.
-
-Current render scale:
-
-```ts
-const SCALE = 1.25;
-```
-
-Overlay conversion:
-
-```text
-css_left   = pdf_x0 * SCALE
-css_top    = pdf_y0 * SCALE
-css_width  = (pdf_x1 - pdf_x0) * SCALE
-css_height = (pdf_y1 - pdf_y0) * SCALE
-font_size  = span_size * SCALE
-```
-
-Shape drawing conversion:
-
-```text
-pdf_x = pointer_x / SCALE
-pdf_y = pointer_y / SCALE
-```
-
-OCR conversion:
-
-```text
-pdf_x = (ocr_pixel_x / canvas_width) * page_width
-pdf_y = (ocr_pixel_y / canvas_height) * page_height
-```
-
-Any future zoom work should replace the fixed `SCALE` with a single zoom state shared by canvas rendering, overlays, drawing, and OCR conversion.
-
-## Session and Versioning Model
-
-Each upload creates a UUID session directory under `settings.temp_dir`.
+Each session has a directory under `settings.temp_dir`.
 
 ```text
 <temp_dir>/
@@ -111,236 +73,331 @@ Each upload creates a UUID session directory under `settings.temp_dir`.
     versions/
       0000.pdf
       0001.pdf
-      0002.pdf
+      ...
+    object_versions/
+      0000.json
+      0001.json
+      ...
+    assets/
+      <asset_id>.png
+      <asset_id>.jpg
+    exports/
+      download-0003.pdf
 ```
 
 `manifest.json` stores:
 
 - `session_id`
 - original filename
-- version filenames
-- current version index
+- ordered PDF version filenames
+- ordered object version filenames
+- current history index
 - created/updated timestamps
 
-Every mutating endpoint uses `SessionManager.mutate(session_id, mutator)`:
+The important rule is that PDF versions and object versions share the same history index.
 
-1. Acquire the session lock.
-2. Open the current PDF version.
-3. Run the mutator against the open `fitz.Document`.
-4. Save a new PDF version.
-5. Drop redo history if editing after an undo.
-6. Trim old versions past `AEROPDF_MAX_HISTORY_VERSIONS`.
-7. Save the manifest atomically.
+That means:
 
-This gives crash-resistant mutation boundaries and safe undo/redo. It also means no endpoint should open a session PDF and save it manually.
+- undo/redo restores both the PDF snapshot and the object snapshot
+- a PDF-only mutation clones the current object snapshot forward
+- an object-only mutation copies the current PDF snapshot forward
 
-## Text Editing
+This keeps one linear history instead of two diverging histories.
 
-### Find and Replace
+## Object Model
 
-Engine functions:
+Overlay objects are stored as JSON objects with a stable `id` and a common shape:
 
-- `replace_text`
-- `replace_on_page`
+- `id`
+- `page_number`
+- `type`
+- `bbox`
+- `rotation`
+- `opacity`
+- `z_index`
+- `locked`
+- `hidden`
 
-Behavior:
+Supported object types:
 
-- Finds matches on one page or the full document.
-- Adds redaction annotations for all matches on a page.
-- Applies redactions once per page.
-- Inserts replacement text at the captured baseline with a resolved base-14 font.
-- Supports whole-word and case-sensitive options.
+- `text`
+- `comment`
+- `signature`
+- `image`
+- `shape`
 
-Important rule: call `apply_redactions()` after all redaction annotations for the page have been added. Calling it inside a per-match loop can corrupt content streams.
+Type-specific fields:
 
-### Block Editing
+- text-like objects: `text`, `font_family`, `font_size`, `font_weight`, `font_style`, `color`, `align`
+- image objects: `asset_id`
+- shape objects: `shape_type`, `stroke_color`, `fill_color`, `line_width`
 
-Engine function:
+Current frontend interaction:
 
-- `edit_block`
+- create
+- select
+- drag/move
+- edit from inspector
+- delete
+- reorder z-index
 
-Behavior:
+Current limitation:
 
-- Redacts the original bbox using a sampled background fill.
-- Resolves the requested font to a base-14 PDF font.
-- Uses `insert_textbox` to reflow text inside the original rectangle.
-- Auto-shrinks text until it fits or reaches `MIN_FONT_SIZE`.
-- Returns warnings instead of silently ignoring overflow risk.
+- resize is done by numeric inspector values, not direct drag handles
+- rotation is stored in the schema but not yet applied in the UI/flatten path
 
-## OCR Pipeline
+## Mutation Boundaries
 
-OCR remains client-side because it is CPU-heavy and works on free hosting without a worker queue.
+### `SessionManager.mutate`
 
-Current flow:
+Use this for true PDF mutations:
 
-1. `PDFCanvas.tsx` detects scanned pages when a page has images but no text blocks.
-2. User starts OCR from the page overlay.
-3. Tesseract.js reads `canvas.toDataURL("image/png")` in a web worker.
-4. Paragraph bounding boxes are mapped from canvas pixels to PDF points.
-5. Frontend sends normalized blocks to `POST /api/ocr/{session_id}`.
-6. Backend inserts OCR text boxes into the current PDF through `insert_ocr_blocks`.
-7. `SessionManager` saves a new version snapshot, so OCR is undoable and exportable.
+- replace text
+- edit block
+- OCR insertion
+- rotate/delete/reorder/duplicate/insert page
+- highlight annotation
+- flatten commit
 
-OCR request shape:
+Flow:
 
-```json
-{
-  "page_number": 1,
-  "blocks": [
-    {
-      "text": "Recognized text",
-      "bbox": [50, 80, 300, 120],
-      "font_name": "Helvetica",
-      "font_size": 12,
-      "hex_color": "#000000",
-      "auto_shrink": true
-    }
-  ]
-}
+1. lock session
+2. open current PDF
+3. mutate `fitz.Document`
+4. save next PDF snapshot
+5. clone current object snapshot
+6. commit history
+
+### `SessionManager.mutate_objects`
+
+Use this for overlay metadata changes:
+
+- create/update/delete object
+- reorder objects
+- add image object
+- add shape object
+
+Flow:
+
+1. lock session
+2. read current object JSON
+3. mutate object list
+4. copy current PDF forward untouched
+5. save next object JSON snapshot
+6. commit history
+
+## Extraction Model
+
+`pdf_engine.extract_pdf_data(doc)` extracts:
+
+- document metadata
+- page geometry
+- text blocks / lines / spans
+- page images
+
+`SessionManager.extract(session_id)` then augments each page with:
+
+- `objects: EditorObject[]`
+
+That means the frontend page tree is the single source for:
+
+- rendered PDF background
+- selectable existing text spans
+- editable overlay objects
+
+## Flatten / Export Model
+
+Overlay objects are not written into the PDF immediately.
+
+Two paths exist:
+
+### Download path
+
+`GET /api/download/{session_id}` calls `SessionManager.export_path(session_id)`.
+
+- if there are no overlay objects, it returns the current PDF path
+- if overlay objects exist, it creates a flattened export PDF in `exports/` and serves that file
+
+This does not change history.
+
+### Commit path
+
+`POST /api/flatten/{session_id}` calls `SessionManager.flatten(session_id)`.
+
+- overlay objects are written into a new PDF version
+- a new empty object snapshot is created
+- history advances
+
+This is the explicit “commit overlay layer into the document” action.
+
+## PDF Engine Responsibilities
+
+`pdf_engine.py` remains stateless. It never owns session paths or manifests.
+
+Main responsibilities:
+
+- extract pages/spans/images
+- replace text
+- edit text blocks
+- rotate/delete/reorder/duplicate pages
+- insert OCR text
+- insert highlight annotations
+- flatten overlay objects into a document
+
+`flatten_objects(doc, objects, asset_resolver)` currently handles:
+
+- shape objects via drawing primitives
+- image objects via `insert_image`
+- text/signature objects via `insert_textbox`
+- comment objects via a filled rectangle plus text
+
+## Frontend Architecture
+
+### `App.tsx`
+
+Owns:
+
+- session pages and metadata
+- undo/redo history state
+- active page
+- active tool
+- selected extracted text block
+- selected overlay object
+- mutation handlers
+- global toasts and modal state
+
+The editor shell is now explicitly Figma-like:
+
+- fixed top toolbar
+- left pages panel
+- centered canvas workspace
+- right contextual inspector
+
+### `PDFCanvas.tsx`
+
+Renders:
+
+- PDF.js canvas background
+- extracted text span hitboxes
+- overlay object layer
+- OCR overlay state
+- draw preview state
+
+It now supports:
+
+- selecting existing text spans for block edits
+- selecting overlay objects
+- dragging overlay objects
+- click-to-create text/comment/signature objects
+- drag-to-create shape objects
+
+### `Sidebar.tsx`
+
+Renders:
+
+- logo header
+- clean framed page previews
+- active page state
+
+PDF thumbnails are still sourced from PDF.js, but the presentation is more controlled and document-like.
+
+### `PropertiesPanel.tsx`
+
+Acts as a contextual inspector.
+
+It supports:
+
+- page actions
+- extracted text block editing
+- overlay object transform/content/appearance editing
+- layer ordering
+- export and flatten actions
+
+## Coordinate Model
+
+Current frontend render scale:
+
+```ts
+const SCALE = 1.25;
 ```
 
-Known limitation: OCR text is inserted as visible text into approximate paragraph boxes. The app does not yet store OCR confidence, expose a review queue, or preserve a hidden searchable text layer separate from visible text.
-
-## Annotation and Drawing Model
-
-Current annotation operations are committed directly into the PDF:
-
-- `insert_image`
-- `draw_shape`
-- `add_highlight`
-
-Validation exists for:
-
-- image MIME type
-- image byte size
-- positive width and height
-- valid shape/highlight bounding boxes
-- page bounds
-- line width greater than zero
-
-Current limitation: inserted images and shapes are not yet first-class selectable objects in frontend state. Once committed, they become part of the PDF rendering. The next product step is object selection/editing with move, resize, restyle, and delete.
-
-## API Reference
-
-### Upload Response
-
-```json
-{
-  "session_id": "uuid",
-  "filename": "document.pdf",
-  "metadata": {
-    "title": "",
-    "author": "",
-    "pages": 1,
-    "encrypted": false
-  },
-  "pages": [],
-  "history": {
-    "can_undo": false,
-    "can_redo": false,
-    "version": 0,
-    "total_versions": 1
-  }
-}
-```
-
-### Shared Edit Response
-
-```json
-{
-  "success": true,
-  "message": "",
-  "pages": [],
-  "metadata": {},
-  "history": {
-    "can_undo": true,
-    "can_redo": false,
-    "version": 1,
-    "total_versions": 2
-  },
-  "replacements_made": null,
-  "warnings": []
-}
-```
-
-### Routes
-
-| Method | Path | Request |
-| --- | --- | --- |
-| `GET` | `/api/health` | none |
-| `POST` | `/api/upload` | multipart `file` |
-| `GET` | `/api/download/{session_id}` | none |
-| `DELETE` | `/api/session/{session_id}` | none |
-| `POST` | `/api/replace/{session_id}` | `ReplaceRequest` |
-| `POST` | `/api/edit-block/{session_id}` | `EditBlockRequest` |
-| `POST` | `/api/ocr/{session_id}` | `PersistOCRRequest` |
-| `POST` | `/api/command/{session_id}` | `CommandRequest` |
-| `POST` | `/api/undo/{session_id}` | none |
-| `POST` | `/api/redo/{session_id}` | none |
-| `POST` | `/api/pages/rotate/{session_id}` | `RotateRequest` |
-| `POST` | `/api/pages/delete/{session_id}` | `DeletePagesRequest` |
-| `POST` | `/api/pages/reorder/{session_id}` | `ReorderRequest` |
-| `POST` | `/api/pages/duplicate/{session_id}` | `DuplicatePageRequest` |
-| `POST` | `/api/pages/insert-blank/{session_id}` | `InsertBlankRequest` |
-| `POST` | `/api/add-image/{session_id}` | multipart image + page/x/y/width/height |
-| `POST` | `/api/draw-shape/{session_id}` | `DrawShapeRequest` |
-| `POST` | `/api/add-highlight/{session_id}` | `HighlightRequest` |
-
-## Command Bar Grammar
-
-Supported commands:
-
-- `replace "a" with "b"`
-- `replace "a" with "b" on page 2`
-- `delete page 3`
-- `delete pages 2-4`
-- `delete pages 1,3,5`
-- `rotate page 2 left`
-- `rotate page 2 right`
-- `rotate page 2 180`
-- `rotate all right`
-- `duplicate page 4`
-- `insert page after page 2`
-
-This is a deterministic parser, not an LLM integration.
-
-## Deployment Architecture
-
-The app currently deploys as two independent services.
+Conversions:
 
 ```text
-Vercel static frontend
-  -> VITE_API_BASE
-  -> Render FastAPI backend
-  -> local session storage on backend instance
+css_left   = pdf_x0 * SCALE
+css_top    = pdf_y0 * SCALE
+css_width  = (pdf_x1 - pdf_x0) * SCALE
+css_height = (pdf_y1 - pdf_y0) * SCALE
 ```
 
-This is suitable for a free-tier prototype and short-lived editing sessions.
+Dragging:
 
-For durable accounts, team workspaces, saved documents, or audit trails, the architecture should add:
+```text
+pdf_dx = pointer_delta_x / SCALE
+pdf_dy = pointer_delta_y / SCALE
+```
 
-- Authentication provider.
-- Object storage for PDFs and versions.
-- Database for users, documents, sessions, and audit events.
-- Optional worker queue for OCR/merge/split jobs.
+OCR:
 
-Do not add a database just to support the current anonymous single-session editor. It adds deployment complexity without solving the current editing workflow.
+```text
+pdf_x = (ocr_pixel_x / canvas_width) * page_width
+pdf_y = (ocr_pixel_y / canvas_height) * page_height
+```
 
-## Free-Tier-Friendly Upgrade Path
+Any zoom feature must replace the fixed `SCALE` with shared zoom state used by:
 
-Recommended order:
+- PDF.js viewport rendering
+- overlay object layout
+- extracted text hitboxes
+- drag math
+- OCR coordinate conversion
 
-1. Finish object editing in the current architecture.
-2. Add merge, split, page extraction, and drag reorder.
-3. Add Playwright smoke tests.
-4. Add optional auth and document metadata when the product needs saved documents.
-5. Add external PDF storage only when sessions must survive host restarts reliably.
+## API Surface
 
-Good candidates when that phase arrives:
+Important routes:
 
-- Supabase: relational metadata, auth, storage, simple team/workspace model.
-- Firebase: quick auth and simple document metadata.
-- Cloudinary or object storage equivalent: image/PDF asset storage.
-- Sentry: frontend/backend error monitoring.
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/upload` | Create session |
+| `GET` | `/api/download/{session_id}` | Flatten-on-download export |
+| `POST` | `/api/edit-block/{session_id}` | Edit existing PDF text block |
+| `POST` | `/api/replace/{session_id}` | Replace text |
+| `POST` | `/api/ocr/{session_id}` | Persist OCR into the PDF |
+| `POST` | `/api/add-image/{session_id}` | Create image overlay object |
+| `POST` | `/api/draw-shape/{session_id}` | Create shape overlay object |
+| `POST` | `/api/add-highlight/{session_id}` | Add highlight directly into the PDF |
+| `POST` | `/api/objects/{session_id}` | Create object |
+| `PATCH` | `/api/objects/{session_id}/{object_id}` | Update object |
+| `DELETE` | `/api/objects/{session_id}/{object_id}` | Delete object |
+| `POST` | `/api/objects/{session_id}/reorder` | Reorder object z-index |
+| `POST` | `/api/flatten/{session_id}` | Commit overlay objects into a PDF version |
+| `GET` | `/api/assets/{session_id}/{asset_id}` | Serve stored object asset |
 
-Keep the current no-deployment-change phase focused on feature depth and reliability.
+## Why There Is Still No Database
+
+The current app remains anonymous and session-based.
+
+A database is still unnecessary for:
+
+- single-user editing sessions
+- undo/redo
+- object-layer editing
+- export
+
+A database becomes justified only when the product needs:
+
+- authentication
+- saved documents across sessions
+- team workspaces
+- audit trails
+- durable metadata separate from session files
+
+On a free-tier roadmap, adding a DB before those needs exist would mostly add deployment complexity, not product value.
+
+## Recommended Next Work
+
+1. Add drag-handle resize and rotation for overlay objects.
+2. Add zoom controls with a single shared scale source.
+3. Add page drag-and-drop reorder in the UI.
+4. Add merge/split/extract flows.
+5. Add Playwright coverage for object editing, flatten, and export.
