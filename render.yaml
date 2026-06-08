@@ -1,6 +1,6 @@
 # Render blueprint — AeroPDF backend (FastAPI + PyMuPDF).
 # Deploy: https://render.com → New → Blueprint → point at this repo.
-# The frontend is deployed separately on Vercel (see vercel.json + README).
+# The frontend is deployed separately on Vercel (see vercel.json).
 
 services:
   - type: web
@@ -12,15 +12,14 @@ services:
     healthCheckPath: /api/health
     autoDeploy: true
     envVars:
-      # Set this to your Vercel frontend URL (no trailing slash).
-      # Copy it from the Vercel dashboard after your first frontend deploy.
+      # Comma-separated list of allowed CORS origins (no trailing slash).
+      # Add preview URLs separated by commas if needed.
       - key: AEROPDF_ALLOWED_ORIGINS
-        value: https://your-app.vercel.app
+        value: https://proeditorfree.vercel.app
       - key: AEROPDF_JSON_LOGS
         value: "true"
-    # Free plan: no persistent disk — sessions live in ephemeral storage.
-    # Undo/redo history resets on each deploy/restart.
-    # To persist history, upgrade to a paid plan and uncomment below:
+    # Free plan: no persistent disk — sessions are ephemeral.
+    # Upgrade to paid + uncomment to persist undo/redo history across restarts:
     #   envVars:
     #     - key: AEROPDF_TEMP_DIR
     #       value: /var/data/aeropdf_sessions

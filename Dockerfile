@@ -1,6 +1,5 @@
 # Root-level Dockerfile for Render (Docker web service).
-# Render looks for Dockerfile at the repo root when the service was configured
-# via the dashboard (not via render.yaml blueprint).
+# Used when the Render service was configured via the dashboard (not render.yaml blueprint).
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -17,6 +16,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/ .
 
 EXPOSE 8000
+
+# Default CORS allowlist — override at runtime via AEROPDF_ALLOWED_ORIGINS env var.
+ENV AEROPDF_ALLOWED_ORIGINS=https://proeditorfree.vercel.app
 
 # Render injects $PORT; fall back to 8000 for local docker run
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]

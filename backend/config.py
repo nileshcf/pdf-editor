@@ -30,7 +30,15 @@ def _default_temp_dir() -> str:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="AEROPDF_", env_file=".env", extra="ignore")
+    # env_delimiter="," lets you write AEROPDF_ALLOWED_ORIGINS as a plain
+    # comma-separated string instead of a JSON array, e.g.:
+    #   AEROPDF_ALLOWED_ORIGINS=https://proeditorfree.vercel.app,http://localhost:5173
+    model_config = SettingsConfigDict(
+        env_prefix="AEROPDF_",
+        env_file=".env",
+        extra="ignore",
+        env_delimiter=",",
+    )
 
     # --- Storage -----------------------------------------------------------
     temp_dir: str = Field(default_factory=_default_temp_dir)
