@@ -2,14 +2,12 @@
 // Every mutating endpoint returns the same EditResponse shape, so callers can
 // uniformly refresh pages + history from one place (see App.applyEdit).
 
-// Detect Vercel multi-service deployment: if VITE_API_BASE is not set and we're on a
-// Vercel domain, default to /_/backend/api (the backend service route prefix).
-// Otherwise, use /api for local dev (vite.config.ts proxies it to http://localhost:8000).
-const API_BASE = import.meta.env.VITE_API_BASE || (
-  typeof window !== 'undefined' && window.location.hostname.includes('.vercel.app')
-    ? '/_/backend/api'
-    : '/api'
-);
+// API base resolution:
+//   - Production (frontend on Vercel, backend on Render): set VITE_API_BASE to the
+//     Render backend's public URL + "/api", e.g. https://aeropdf-backend.onrender.com/api
+//   - Local dev: leave VITE_API_BASE unset and "/api" is proxied to the backend by
+//     vite.config.ts (target http://localhost:8000).
+const API_BASE = import.meta.env.VITE_API_BASE || '/api';
 
 export interface HistoryState {
   can_undo: boolean;

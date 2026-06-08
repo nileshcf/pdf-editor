@@ -30,7 +30,8 @@ Requirements: Python 3.8+, Node 18+.
 ```
 pdf-editor/
 ├── run.py                  # Orchestrator — starts both servers
-├── vercel.json             # Vercel multi-service deployment config
+├── vercel.json             # Vercel frontend (Vite SPA) build config
+├── render.yaml             # Render backend (Docker) blueprint
 ├── docker-compose.yml      # Docker self-host config
 ├── CLAUDE.md               # ← you are here
 ├── ARCHITECTURE.md         # Deep-dive: coordinate math, API schemas, OCR pipeline
@@ -218,18 +219,30 @@ docker-compose up --build
 # frontend → :80, backend → :8000
 ```
 
-### Vercel (frontend + backend together)
-See `vercel.json` — uses Vercel experimental multi-services.
+### Production — backend on Render, frontend on Vercel (canonical)
 
-**Setup steps:**
-1. Push to GitHub (Vercel auto-detects the `vercel.json` config)
-2. On the Vercel dashboard, set environment variables for the **frontend** service:
-   - `VITE_API_BASE=/_/backend/api`
-3. For the **backend** service, optionally set:
-   - `AEROPDF_TEMP_DIR=/tmp/aeropdf` (default temp dir is ephemeral on Vercel)
-4. Deploy
+Two independent services. Render is long-lived, so the session/version model
+(undo/redo, durable history) works as designed — no serverless caveat applies.
 
-Alternatively, deploy the backend separately (Railway / Render) and set `VITE_API_BASE` to that backend URL instead of the relative path.
+**Backend → Render** (`render.yaml` blueprint, or a manual Docker web service):
+- Root dir `backend/`, runtime Docker. The Dockerfile binds `0.0.0.0:$PORT`
+  (`CMD ["sh","-c","uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]`) —
+  Render injects `$PORT`, so do **not** hard-code 8000 in the CMD.
+- Health check: `/api/health`.
+- Set `AEROPDF_ALLOWED_ORIGINS` to the Vercel frontend URL(s), comma-separated,
+  no trailing slash. This is the CORS allowlist read in `config.py` /
+  consumed by the `CORSMiddleware` in `main.py`.
+- `render.yaml` mounts a 1 GB disk at `/var/data` and points
+  `AEROPDF_TEMP_DIR=/var/data/aeropdf_sessions` so history survives restarts.
+  (Free plan has no disk → drop the `disk:` block; history is then ephemeral.)
+
+**Frontend → Vercel** (`vercel.json` — plain Vite SPA, no multi-service):
+- `vercel.json` builds `frontend/` (`cd frontend && npm install && npm run build`,
+  output `frontend/dist`) and rewrites all routes to `/index.html`.
+- Set `VITE_API_BASE` to the Render URL + `/api`
+  (e.g. `https://aeropdf-backend.onrender.com/api`). `src/api.ts` reads this and
+  falls back to `/api` (Vite dev proxy) only when unset — there is no longer any
+  `.vercel.app` → `/_/backend/api` auto-detect.
 
 ### Backend configuration (env vars, prefix `AEROPDF_`)
 

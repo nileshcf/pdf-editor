@@ -43,26 +43,46 @@ Press `Ctrl+C` to cleanly shut down both servers.
 
 ## Deployment
 
-### Vercel (recommended — frontend + backend together)
+### Backend on Render + frontend on Vercel (recommended)
 
-1. Push this repo to GitHub and import it on [vercel.com](https://vercel.com).
-2. In **Project Settings → Environment Variables**, add the following for the **frontend** service:
+Render is a long-lived host, so sessions and full undo/redo history survive
+between requests (unlike serverless). Deploy the two services in this order.
+
+**1. Backend → Render**
+
+1. Push this repo to GitHub.
+2. On [render.com](https://render.com): **New → Blueprint**, select this repo. Render
+   reads [`render.yaml`](./render.yaml) and provisions the Dockerized backend
+   (rooted at `backend/`, health check at `/api/health`).
+   - Or do it manually: **New → Web Service**, Root Directory `backend`, runtime
+     Docker. Render injects `$PORT`; the Dockerfile already binds to it.
+3. Note the service's public URL, e.g. `https://aeropdf-backend.onrender.com`.
+4. Set the CORS env var on the backend service (you'll fill the real value after
+   step 2 once you know the Vercel URL):
 
    | Key | Value |
    |-----|-------|
-   | `VITE_API_BASE` | `/_/backend/api` |
+   | `AEROPDF_ALLOWED_ORIGINS` | `https://your-frontend.vercel.app` |
 
-3. Deploy. Vercel will build the Vite frontend and run the FastAPI backend via `vercel.json` experimental multi-services.
+   Comma-separate multiple origins (e.g. add your `*.vercel.app` preview URL). No trailing slash.
 
-> **Note**: Sessions are stored in memory. A fresh upload is needed after each Vercel cold start.
+**2. Frontend → Vercel**
 
-### Backend on Railway / Render + frontend on Vercel
+1. Import the same repo on [vercel.com](https://vercel.com). `vercel.json` builds the
+   Vite app from `frontend/` and serves it as a static SPA — no extra settings needed.
+2. In **Project Settings → Environment Variables**, add:
 
-If you prefer separate services:
+   | Key | Value |
+   |-----|-------|
+   | `VITE_API_BASE` | `https://aeropdf-backend.onrender.com/api` |
 
-1. Deploy `backend/` to Railway or Render (the `Dockerfile` is ready to use).
-2. On Vercel, set `VITE_API_BASE` to your backend's public URL + `/api` (e.g. `https://my-backend.railway.app/api`).
-3. On your backend service, set `CORS_ORIGINS` to your Vercel frontend URL or keep `allow_origins=["*"]` for development.
+   (your Render URL from step 1 + `/api`).
+3. Deploy, then go back and set `AEROPDF_ALLOWED_ORIGINS` on Render to the Vercel URL.
+
+> **Free-tier note**: Render free instances sleep when idle, so the first request
+> after a pause takes a few seconds to wake. Free instances also have no persistent
+> disk — session history resets on each deploy/restart. For durable history, use a
+> paid instance and keep the `disk:` block in `render.yaml`.
 
 ### Docker (self-hosted)
 
@@ -79,7 +99,8 @@ docker-compose up --build
 ```
 pdf-editor/
 ├── run.py                  # Dev orchestrator
-├── vercel.json             # Vercel multi-service config
+├── vercel.json             # Vercel frontend (Vite SPA) build config
+├── render.yaml             # Render backend (Docker) blueprint
 ├── docker-compose.yml
 ├── CLAUDE.md               # AI codebase guide (architecture, gotchas, patterns)
 ├── ARCHITECTURE.md         # Deep-dive: coordinate math, API schemas, OCR pipeline

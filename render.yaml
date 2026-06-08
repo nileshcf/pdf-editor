@@ -1,0 +1,28 @@
+# Render blueprint — AeroPDF backend (FastAPI + PyMuPDF).
+# Deploy: https://render.com → New → Blueprint → point at this repo.
+# The frontend is deployed separately on Vercel (see vercel.json).
+services:
+  - type: web
+    name: aeropdf-backend
+    runtime: docker
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    plan: free               # free instances sleep when idle (~50s cold start on wake)
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      # CORS allowlist — your Vercel frontend URL (no trailing slash).
+      # Comma-separate to add more origins (e.g. preview deployments).
+      - key: AEROPDF_ALLOWED_ORIGINS
+        value: https://proeditorfree.vercel.app
+    # NOTE: the free plan has no persistent disk, so sessions live in the
+    # container's ephemeral storage and undo/redo history resets on each
+    # deploy/restart. Single edit sessions work fine. To make history durable,
+    # upgrade to a paid instance and add:
+    #   envVars:
+    #     - key: AEROPDF_TEMP_DIR
+    #       value: /var/data/aeropdf_sessions
+    #   disk:
+    #     name: aeropdf-data
+    #     mountPath: /var/data
+    #     sizeGB: 1

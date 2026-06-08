@@ -164,31 +164,33 @@ For heavy OCR and multi-page flattening:
 
 ---
 
-## 7. Vercel Multi-Service Deployment
+## 7. Deployment — backend on Render, frontend on Vercel
 
-To deploy both frontend (Vite React) and backend (FastAPI) together as separate services on Vercel:
+The two halves deploy as fully independent services. Because Render is a
+long-lived host (not serverless), the session/version model in `sessions.py`
+behaves as designed: undo/redo stacks and snapshot history persist across
+requests, and a mounted disk keeps them across restarts.
 
-1.  **Vercel Configuration**:
-    Create a `vercel.json` file in the root workspace folder:
-    ```json
-    {
-        "experimentalServices": {
-            "frontend": {
-                "root": "frontend",
-                "routePrefix": "/",
-                "framework": "vite"
-            },
-            "backend": {
-                "root": "backend",
-                "routePrefix": "/_/backend"
-            }
-        }
-    }
-    ```
-2.  **API Routing Alignment**:
-    *   The frontend environment variable `VITE_API_BASE` is utilized to direct HTTP requests dynamically.
-    *   For local dev server proxying, `VITE_API_BASE` defaults to `/api`.
-    *   During Vercel production builds, specify the environment parameter:
-        `VITE_API_BASE=/_/backend/api`
-    *   This forces client calls (e.g. upload, edit, download) to point to `/_/backend/api/...` which Vercel routes automatically to the FastAPI backend service `/api/...` context.
+1.  **Backend → Render** (`render.yaml` blueprint, or a manual Docker web service):
+    *   Root directory `backend/`, runtime Docker. Render injects the listen port
+        as `$PORT`; the Dockerfile binds it via
+        `CMD ["sh","-c","uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]`.
+        Hard-coding `8000` in the CMD would make Render's health check fail.
+    *   Health check path: `/api/health`.
+    *   `AEROPDF_ALLOWED_ORIGINS` — set to the Vercel frontend URL(s),
+        comma-separated, no trailing slash. This is the CORS allowlist applied by
+        `CORSMiddleware` in `main.py`.
+    *   `render.yaml` mounts a 1 GB disk at `/var/data` and sets
+        `AEROPDF_TEMP_DIR=/var/data/aeropdf_sessions` so version history survives
+        deploys/restarts. (Free plan has no disk — drop the `disk:` block; history
+        is then ephemeral but the service still works.)
+
+2.  **Frontend → Vercel** (`vercel.json` — a plain Vite SPA, no multi-service):
+    *   `vercel.json` builds `frontend/` (`cd frontend && npm install && npm run build`,
+        output `frontend/dist`) and rewrites all routes to `/index.html`.
+    *   Set `VITE_API_BASE` to the Render backend URL + `/api`, e.g.
+        `https://aeropdf-backend.onrender.com/api`.
+    *   `src/api.ts` reads `VITE_API_BASE` and falls back to `/api` (the Vite dev
+        proxy) only when it is unset. There is no `.vercel.app` auto-detect — the
+        backend lives on Render, so the env var must be set in production.
 
