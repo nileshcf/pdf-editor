@@ -53,10 +53,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AeroPDF Backend", version="2.0.0", lifespan=lifespan)
 
-_allow_all = "*" in settings.allowed_origins
+_origins = settings.cors_origins   # parsed list from comma-separated env var
+_allow_all = "*" in _origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if _allow_all else settings.allowed_origins,
+    allow_origins=["*"] if _allow_all else _origins,
     allow_credentials=not _allow_all,  # credentials + wildcard origin is invalid
     allow_methods=["*"],
     allow_headers=["*"],

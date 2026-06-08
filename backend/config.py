@@ -6,6 +6,7 @@ All tunables live here and can be overridden via environment variables
 prod.  Example::
 
     AEROPDF_MAX_FILE_MB=100 AEROPDF_ALLOWED_ORIGINS="https://app.example.com"
+    AEROPDF_ALLOWED_ORIGINS="https://foo.vercel.app,https://bar.vercel.app"
 """
 from __future__ import annotations
 
@@ -19,25 +20,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _default_temp_dir() -> str:
-    """Pick a writable session-storage root.
-
-    On serverless platforms (Vercel, AWS Lambda) the deployment filesystem is
-    read-only and only the system temp dir (``/tmp``) is writable, so we root
-    storage there by default.  This is writable everywhere — local, Docker and
-    serverless — and keeps the repo clean.  Override with ``AEROPDF_TEMP_DIR``.
-    """
+    """Pick a writable session-storage root."""
     return os.path.join(tempfile.gettempdir(), "aeropdf_sessions")
 
 
 class Settings(BaseSettings):
-    # env_delimiter="," lets you write AEROPDF_ALLOWED_ORIGINS as a plain
-    # comma-separated string instead of a JSON array, e.g.:
-    #   AEROPDF_ALLOWED_ORIGINS=https://proeditorfree.vercel.app,http://localhost:5173
     model_config = SettingsConfigDict(
         env_prefix="AEROPDF_",
         env_file=".env",
         extra="ignore",
-        env_delimiter=",",
     )
 
     # --- Storage -----------------------------------------------------------
@@ -48,17 +39,25 @@ class Settings(BaseSettings):
     max_pages: int = 2000
 
     # --- Sessions ----------------------------------------------------------
-    session_ttl_hours: int = 24          # idle sessions older than this are purged
-    max_history_versions: int = 50       # undo/redo depth per session
-    cleanup_on_shutdown: bool = False    # keep temp dir so sessions survive restarts
+    session_ttl_hours: int = 24
+    max_history_versions: int = 50
+    cleanup_on_shutdown: bool = False
 
     # --- Security ----------------------------------------------------------
-    # Comma-separated list in the env var; "*" allows all (dev only).
-    allowed_origins: List[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    # Plain comma-separated string — stored as str so pydantic-settings never
+    # tries to JSON-decode it.  "*" allows all origins (dev only).
+    # e.g. AEROPDF_ALLOWED_ORIGINS=https://proeditorfree.vercel.app
+    allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     # --- Logging -----------------------------------------------------------
     log_level: str = "INFO"
     json_logs: bool = False
+
+    # --- Derived -----------------------------------------------------------
+    @property
+    def cors_origins(self) -> List[str]:
+        """Parsed list of allowed origins from the comma-separated env var."""
+        return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
 
     @property
     def max_file_bytes(self) -> int:
