@@ -391,8 +391,19 @@ button {
   cursor: crosshair;
 }
 
+/* While drawing, existing objects must not intercept the drag —
+   otherwise you can't draw a shape across them. */
+.editing-overlay-layer.drawing-mode .canvas-object {
+  pointer-events: none;
+}
+
 .object-overlay-layer {
   z-index: 18;
+  /* Critical: this full-size div sits over the whole page. Without this,
+     every click on empty canvas hits it instead of .editing-overlay-layer,
+     and the target!==currentTarget guard kills click-to-create, shape
+     drawing and click-to-deselect. Objects re-enable hits themselves. */
+  pointer-events: none;
 }
 
 .editable-text-block {
@@ -420,6 +431,8 @@ button {
   position: absolute;
   user-select: none;
   overflow: visible;
+  pointer-events: auto; /* parent layer is pointer-events: none */
+  touch-action: none;   /* let pointer events drive dragging on touch */
 }
 
 .canvas-object.selected {

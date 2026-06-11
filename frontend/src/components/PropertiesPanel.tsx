@@ -114,10 +114,12 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
   useEffect(() => {
     if (!selectedObject) return;
     const [x0, y0, x1, y1] = selectedObject.bbox;
-    setX(Number(x0.toFixed(1)));
-    setY(Number(y0.toFixed(1)));
-    setW(Number((x1 - x0).toFixed(1)));
-    setH(Number((y1 - y0).toFixed(1)));
+    // Lines/arrows keep their direction in the bbox, so show the normalised
+    // envelope here (W/H must never display negative).
+    setX(Number(Math.min(x0, x1).toFixed(1)));
+    setY(Number(Math.min(y0, y1).toFixed(1)));
+    setW(Number(Math.abs(x1 - x0).toFixed(1)));
+    setH(Number(Math.abs(y1 - y0).toFixed(1)));
     if (selectedObject.type === 'text' || selectedObject.type === 'comment' || selectedObject.type === 'signature') {
       setObjectText(selectedObject.text || '');
       setObjectFontSize(Math.round(selectedObject.font_size || (selectedObject.type === 'signature' ? 20 : 14)));
@@ -147,7 +149,27 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
 
   const saveObject = () => {
     if (!selectedObject) return;
-    const bbox: [number, number, number, number] = [x, y, x + Math.max(w, 2), y + Math.max(h, 2)];
+    const isDirectional =
+      selectedObject.type === 'shape' &&
+      (selectedObject.shape_type === 'line' || selectedObject.shape_type === 'arrow');
+    let bbox: [number, number, number, number];
+    if (isDirectional) {
+      // Re-apply the original draw direction to the edited envelope so the
+      // arrowhead keeps pointing the same way.
+      const [ox0, oy0, ox1, oy1] = selectedObject.bbox;
+      const flipX = ox1 < ox0;
+      const flipY = oy1 < oy0;
+      const safeW = Math.max(w, 0);
+      const safeH = Math.max(h, 0);
+      bbox = [
+        flipX ? x + safeW : x,
+        flipY ? y + safeH : y,
+        flipX ? x : x + safeW,
+        flipY ? y : y + safeH,
+      ];
+    } else {
+      bbox = [x, y, x + Math.max(w, 2), y + Math.max(h, 2)];
+    }
     const payload: UpdateObjectPayload = { bbox };
 
     if (selectedObject.type === 'text' || selectedObject.type === 'comment' || selectedObject.type === 'signature') {

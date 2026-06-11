@@ -219,6 +219,10 @@ Main routes:
 - Do not make `download` serve stale unflattened PDFs when overlay objects exist.
 - Do not reintroduce a CDN PDF.js worker.
 - Do not add a database for the current anonymous session flow unless the product requirement actually changes.
+- `.object-overlay-layer` must keep `pointer-events: none` (objects re-enable themselves). It is a full-size child of `.editing-overlay-layer`, and the canvas click handler guards on `event.target === event.currentTarget` — if this div becomes clickable again, click-to-create, shape drawing, and click-to-deselect all silently die.
+- Line/arrow bboxes are **directional** (`[start_x, start_y, end_x, end_y]`, any orientation) — never normalize them in storage or flatten, only for bounds checks and CSS envelopes. Rect/circle/text bboxes must stay ordered.
+- Object bbox validation lives in `EditorObjectCreateRequest`'s `model_validator`, not a `bbox` field validator — `shape_type` is declared after `bbox`, so a field validator cannot see it.
+- Always load PDF.js documents through `frontend/src/pdfCache.ts` (`getPdfDocument(url, version)`), never `getDocument` directly — the canvas and sidebar share one parsed copy per version.
 
 ## Deployment Notes
 

@@ -24,13 +24,16 @@ def _validate_bbox(session_id: str, page_number: int, bbox: list[float], allow_l
         if not 1 <= page_number <= doc.page_count:
             raise IndexError("Page number out of bounds")
         page = doc[page_number - 1]
-        rect = fitz.Rect(bbox)
+        # Lines/arrows keep their direction in the bbox (start -> end), so
+        # normalise before comparing against the page rectangle.
+        x0, y0, x1, y1 = (float(v) for v in bbox)
+        norm = fitz.Rect(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
         if allow_line:
-            if rect.x0 == rect.x1 and rect.y0 == rect.y1:
+            if x0 == x1 and y0 == y1:
                 raise ValueError("Shape bbox must span a visible area or line")
-        elif rect.width <= 0 or rect.height <= 0:
+        elif norm.width <= 0 or norm.height <= 0:
             raise ValueError("Shape bbox must have positive width and height")
-        if rect.x0 < page.rect.x0 or rect.y0 < page.rect.y0 or rect.x1 > page.rect.x1 or rect.y1 > page.rect.y1:
+        if norm.x0 < page.rect.x0 or norm.y0 < page.rect.y0 or norm.x1 > page.rect.x1 or norm.y1 > page.rect.y1:
             raise ValueError("Object bbox is outside page bounds")
     finally:
         doc.close()

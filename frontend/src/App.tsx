@@ -83,7 +83,9 @@ function App() {
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [toast, setToast] = useState<Toast>({ text: '', type: null });
-  const [activeTool, setActiveTool] = useState<ToolKey>('text');
+  // Default to the cursor (like Figma) — a 'text' default makes every stray
+  // click on the page silently create a text object.
+  const [activeTool, setActiveTool] = useState<ToolKey>('cursor');
   const [showImageModal, setShowImageModal] = useState(false);
   const [activeShape, setActiveShape] = useState<ShapeObjectType>('rect');
   const [strokeColor, setStrokeColor] = useState('#000000');
@@ -206,6 +208,7 @@ function App() {
       setActivePage(1);
       setSelectedBlock(null);
       setSelectedObjectId(null);
+      setActiveTool('cursor');
       showToast(`${data.filename} loaded`, 'success');
     } catch (err: any) {
       showToast(err.message || 'Upload failed', 'error');
@@ -439,6 +442,49 @@ function App() {
       setActiveTool('cursor');
     }
   };
+
+  // Keyboard shortcuts (the toolbar tooltips advertise V / T):
+  // V cursor · T text · Esc deselect · Del remove object · Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y history
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return;
+
+      const mod = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+
+      if (mod && key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        if (sid && history?.can_undo && !isLoading) handleUndo();
+        return;
+      }
+      if (mod && (key === 'y' || (key === 'z' && e.shiftKey))) {
+        e.preventDefault();
+        if (sid && history?.can_redo && !isLoading) handleRedo();
+        return;
+      }
+      if (mod) return; // don't hijack browser shortcuts like Ctrl+S
+
+      if (key === 'escape') {
+        setSelectedBlock(null);
+        setSelectedObjectId(null);
+        setActiveTool('cursor');
+        return;
+      }
+      if ((key === 'delete' || key === 'backspace') && selectedObjectId && !isLoading) {
+        e.preventDefault();
+        handleDeleteObject();
+        return;
+      }
+      if (key === 'v') setActiveTool('cursor');
+      if (key === 't' && session) setActiveTool('text');
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sid, history, isLoading, selectedObjectId, session]);
 
   return (
     <div className="app-shell">

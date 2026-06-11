@@ -1,9 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import * as pdfjsLib from 'pdfjs-dist';
-import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.js?url';
 import { AeroLogo } from './AeroLogo';
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
+import { getPdfDocument } from '../pdfCache';
 
 interface PDFPage {
   number: number;
@@ -71,12 +68,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ pages, activePage, filename, p
       return;
     }
     let cancelled = false;
-    let loadingTask: any = null;
 
     const loadPdf = async () => {
       try {
-        loadingTask = pdfjsLib.getDocument(pdfUrl + (pdfUrl.includes('?') ? '&' : '?') + 'v=' + docVersion);
-        const doc = await loadingTask.promise;
+        // Shared cache: the same document instance the main canvas uses —
+        // one download/parse per version instead of two.
+        const doc = await getPdfDocument(pdfUrl, docVersion);
         if (!cancelled) setPdfDoc(doc);
       } catch {
         if (!cancelled) setPdfDoc(null);
@@ -86,7 +83,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ pages, activePage, filename, p
     loadPdf();
     return () => {
       cancelled = true;
-      loadingTask?.destroy();
     };
   }, [pdfUrl, docVersion]);
 

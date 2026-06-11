@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from schemas import DrawShapeRequest, PersistOCRRequest  # noqa: E402
+from schemas import DrawShapeRequest, EditorObjectCreateRequest, PersistOCRRequest  # noqa: E402
 
 
 def test_draw_shape_bbox_must_be_valid_rect():
@@ -21,6 +21,39 @@ def test_draw_shape_bbox_must_be_valid_rect():
             fill_color="#ffffff",
             line_width=2,
         )
+
+
+def test_draw_shape_allows_directional_line_bbox():
+    # Lines and arrows are directional: drawing right-to-left / bottom-to-top
+    # produces x1 < x0 or y1 < y0 and must be accepted.
+    for shape in ("line", "arrow"):
+        req = DrawShapeRequest(
+            page_number=1,
+            shape_type=shape,
+            bbox=[200, 300, 50, 40],
+            stroke_color="#000000",
+            line_width=2,
+        )
+        assert req.bbox == [200.0, 300.0, 50.0, 40.0]  # direction preserved
+
+    # ...but a zero-length point is still rejected.
+    with pytest.raises(ValidationError):
+        DrawShapeRequest(page_number=1, shape_type="line", bbox=[50, 50, 50, 50], stroke_color="#000000")
+
+
+def test_object_create_validates_line_bbox_after_shape_type():
+    # shape_type is declared after bbox; validation must still honour it
+    # (a horizontal line has zero height and is valid).
+    req = EditorObjectCreateRequest(
+        page_number=1,
+        type="shape",
+        bbox=[10, 100, 200, 100],
+        shape_type="line",
+    )
+    assert req.bbox == [10.0, 100.0, 200.0, 100.0]
+
+    with pytest.raises(ValidationError):
+        EditorObjectCreateRequest(page_number=1, type="shape", bbox=[10, 100, 200, 100], shape_type="rect")
 
 
 def test_persist_ocr_requires_non_empty_blocks():

@@ -231,3 +231,53 @@ def test_flatten_objects_writes_text_and_shape():
     )
     assert "Overlay text" in doc[0].get_text()
     doc.close()
+
+
+def test_draw_shape_directional_line_and_arrow():
+    """Lines/arrows drawn right-to-left or bottom-to-top must work and keep direction."""
+    doc = fitz.open()
+    doc.new_page(width=300, height=200)
+    # start bottom-right, end top-left — previously rejected
+    engine.draw_shape(doc, 1, "line", [250, 150, 30, 20], "#000000", None, 2.0)
+    engine.draw_shape(doc, 1, "arrow", [250, 20, 30, 150], "#ff0000", None, 2.0)
+    drawings = doc[0].get_drawings()
+    assert drawings, "line should be in the content stream"
+    # the drawn line preserves its start/end direction
+    items = [item for d in drawings for item in d["items"] if item[0] == "l"]
+    assert any(abs(p1.x - 250) < 1 and abs(p2.x - 30) < 1 for _, p1, p2 in items)
+    # arrow is a line annotation with raw endpoints
+    annots = list(doc[0].annots() or [])
+    assert len(annots) == 1
+    doc.close()
+
+
+def test_draw_shape_directional_line_rejected_when_outside_page():
+    doc = fitz.open()
+    doc.new_page(width=300, height=200)
+    # start point is beyond the right edge; normalised bounds check must catch it
+    with pytest.raises(ValueError):
+        engine.draw_shape(doc, 1, "line", [350, 50, 100, 50], "#000000", None, 2.0)
+    doc.close()
+
+
+def test_flatten_objects_directional_line():
+    doc = fitz.open()
+    doc.new_page(width=300, height=200)
+    engine.flatten_objects(
+        doc,
+        [
+            {
+                "id": "line-1",
+                "page_number": 1,
+                "type": "shape",
+                "bbox": [250, 150, 30, 20],  # right-to-left, bottom-to-top
+                "shape_type": "line",
+                "stroke_color": "#000000",
+                "line_width": 2,
+                "z_index": 0,
+            }
+        ],
+        lambda _: "",
+    )
+    assert doc[0].get_drawings()
+    doc.close()

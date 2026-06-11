@@ -1,12 +1,42 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import * as pdfjsLib from 'pdfjs-dist';
-import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.js?url';
 import { createWorker } from 'tesseract.js';
 import type { EditorObject, OCRBlockPayload, PDFPage, ShapeObjectType, UpdateObjectPayload } from '../api';
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
+import { getPdfDocument } from '../pdfCache';
 
 const SCALE = 1.25;
+
+/** Shift (and if necessary shrink) a rect so it lies fully inside the page. */
+const clampRectToPage = (
+  bbox: [number, number, number, number],
+  pageWidth: number,
+  pageHeight: number
+): [number, number, number, number] => {
+  let [x0, y0, x1, y1] = bbox;
+  const w = Math.min(x1 - x0, pageWidth);
+  const h = Math.min(y1 - y0, pageHeight);
+  x0 = Math.min(Math.max(0, x0), pageWidth - w);
+  y0 = Math.min(Math.max(0, y0), pageHeight - h);
+  return [x0, y0, x0 + w, y0 + h];
+};
+
+/** Clamp a drag translation so the moved bbox stays on the page. */
+const clampDelta = (
+  origin: [number, number, number, number],
+  dx: number,
+  dy: number,
+  pageWidth: number,
+  pageHeight: number
+): { dx: number; dy: number } => {
+  // Lines keep direction in their bbox, so use min/max of each pair.
+  const loX = Math.min(origin[0], origin[2]);
+  const hiX = Math.max(origin[0], origin[2]);
+  const loY = Math.min(origin[1], origin[3]);
+  const hiY = Math.max(origin[1], origin[3]);
+  return {
+    dx: Math.min(Math.max(dx, -loX), Math.max(-loX, pageWidth - hiX)),
+    dy: Math.min(Math.max(dy, -loY), Math.max(-loY, pageHeight - hiY)),
+  };
+};
 
 type ToolKey = 'cursor' | 'text' | 'image' | 'draw' | 'signature' | 'comment';
 
@@ -90,9 +120,7 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
         const ctx = canvas.getContext('2d');
         if (!ctx || cancelled) return;
 
-        const versionedUrl = pdfUrl + (pdfUrl.includes('?') ? '&' : '?') + 'v=' + docVersion;
-        const loadingTask = pdfjsLib.getDocument(versionedUrl);
-        const pdf = await loadingTask.promise;
+        const pdf = await getPdfDocument(pdfUrl, docVersion);
         if (cancelled) return;
 
         const pdfPage = await pdf.getPage(page.number);
@@ -138,19 +166,26 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
     };
 
     const handlePointerUp = () => {
-      setDragState((current) => {
-        if (current) {
-          const dx = current.delta.x / SCALE;
-          const dy = current.delta.y / SCALE;
-          if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
-            const [x0, y0, x1, y1] = current.origin;
-            onUpdateObject(current.id, {
-              bbox: [x0 + dx, y0 + dy, x1 + dx, y1 + dy],
-            });
-          }
-        }
-        return null;
-      });
+      // Read the latest drag state from the effect closure (the effect
+      // re-subscribes on every delta change). Side effects like
+      // onUpdateObject must NOT run inside a setState updater — React
+      // warns "cannot update App while rendering PDFCanvas".
+      const current = dragState;
+      setDragState(null);
+      if (!current) return;
+      const { dx, dy } = clampDelta(
+        current.origin,
+        current.delta.x / SCALE,
+        current.delta.y / SCALE,
+        page.width,
+        page.height
+      );
+      if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+        const [x0, y0, x1, y1] = current.origin;
+        onUpdateObject(current.id, {
+          bbox: [x0 + dx, y0 + dy, x1 + dx, y1 + dy],
+        });
+      }
     };
 
     window.addEventListener('pointermove', handlePointerMove);
@@ -159,7 +194,7 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
     };
-  }, [dragState, onUpdateObject]);
+  }, [dragState, onUpdateObject, page.width, page.height]);
 
   const isScanned = page.blocks.length === 0 && page.images.length > 0;
 
@@ -171,10 +206,23 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
 
   const getPointerPoint = (event: React.PointerEvent<HTMLElement>): Point => {
     const rect = event.currentTarget.getBoundingClientRect();
-    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    // Clamp into the page so pointer-captured draws can't leave the canvas.
+    return {
+      x: Math.min(Math.max(0, event.clientX - rect.left), page.width * SCALE),
+      y: Math.min(Math.max(0, event.clientY - rect.top), page.height * SCALE),
+    };
   };
 
   const beginShapeDraw = (event: React.PointerEvent<HTMLDivElement>) => {
+    // Capture so pointerup still reaches us when released outside the page —
+    // otherwise the preview rectangle is stranded mid-draw. Guarded because
+    // capture can throw (NotFoundError) if the pointer is already gone, e.g.
+    // a pen lifted between events.
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // capture is an enhancement, not a requirement
+    }
     const point = getPointerPoint(event);
     setIsDrawing(true);
     setStartPoint(point);
@@ -220,12 +268,21 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
       const point = getPointerPoint(event);
       const baseHeight = activeTool === 'comment' ? 88 : 48;
       const baseWidth = activeTool === 'comment' ? 190 : 220;
-      onCreateObject(activeTool, [
-        point.x / SCALE,
-        point.y / SCALE,
-        (point.x + baseWidth) / SCALE,
-        (point.y + baseHeight) / SCALE,
-      ]);
+      // Clamp so clicks near the right/bottom edge don't produce a bbox the
+      // backend rejects as out of bounds.
+      onCreateObject(
+        activeTool,
+        clampRectToPage(
+          [
+            point.x / SCALE,
+            point.y / SCALE,
+            (point.x + baseWidth) / SCALE,
+            (point.y + baseHeight) / SCALE,
+          ],
+          page.width,
+          page.height
+        )
+      );
       return;
     }
 
@@ -259,8 +316,13 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
 
   const getRenderBBox = (object: EditorObject): [number, number, number, number] => {
     if (dragState?.id !== object.id) return object.bbox;
-    const dx = dragState.delta.x / SCALE;
-    const dy = dragState.delta.y / SCALE;
+    const { dx, dy } = clampDelta(
+      object.bbox,
+      dragState.delta.x / SCALE,
+      dragState.delta.y / SCALE,
+      page.width,
+      page.height
+    );
     return [
       object.bbox[0] + dx,
       object.bbox[1] + dy,
@@ -272,11 +334,17 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
   const renderObject = (object: EditorObject) => {
     const bbox = getRenderBBox(object);
     const [x0, y0, x1, y1] = bbox;
+    // Lines/arrows store direction in the bbox (start -> end), so the CSS box
+    // must be the normalised envelope and the SVG endpoints carry direction.
+    const left = Math.min(x0, x1);
+    const top = Math.min(y0, y1);
+    const boxW = Math.max(Math.abs(x1 - x0) * SCALE, 2);
+    const boxH = Math.max(Math.abs(y1 - y0) * SCALE, 2);
     const style: React.CSSProperties = {
-      left: x0 * SCALE,
-      top: y0 * SCALE,
-      width: Math.max((x1 - x0) * SCALE, 2),
-      height: Math.max((y1 - y0) * SCALE, 2),
+      left: left * SCALE,
+      top: top * SCALE,
+      width: boxW,
+      height: boxH,
       zIndex: (object.z_index ?? 0) + 10,
       opacity: object.opacity ?? 1,
     };
@@ -298,6 +366,11 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
 
     if (object.type === 'shape') {
       if (object.shape_type === 'line' || object.shape_type === 'arrow') {
+        // Endpoints relative to the envelope, preserving draw direction.
+        const sx = (x0 - left) * SCALE;
+        const sy = (y0 - top) * SCALE;
+        const ex = (x1 - left) * SCALE;
+        const ey = (y1 - top) * SCALE;
         return (
           <div
             key={object.id}
@@ -305,19 +378,19 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
             style={style}
             onPointerDown={(event) => handleObjectPointerDown(event, object)}
           >
-            <svg className="line-object-svg" viewBox={`0 0 ${Math.max(style.width as number, 2)} ${Math.max(style.height as number, 2)}`}>
+            <svg className="line-object-svg" viewBox={`0 0 ${boxW} ${boxH}`}>
               <defs>
                 <marker id={`arrow-${object.id}`} viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
                   <path d="M 0 0 L 10 5 L 0 10 z" fill={object.stroke_color || '#000000'} />
                 </marker>
               </defs>
               <line
-                x1={0}
-                y1={0}
-                x2={Math.max(style.width as number, 2)}
-                y2={Math.max(style.height as number, 2)}
+                x1={sx}
+                y1={sy}
+                x2={ex}
+                y2={ey}
                 stroke={object.stroke_color || '#000000'}
-                strokeWidth={object.line_width || 2}
+                strokeWidth={(object.line_width || 2) * SCALE}
                 markerEnd={object.shape_type === 'arrow' ? `url(#arrow-${object.id})` : undefined}
               />
             </svg>
@@ -333,7 +406,7 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
           style={{
             ...style,
             borderColor: object.stroke_color || '#000000',
-            borderWidth: object.line_width || 2,
+            borderWidth: (object.line_width || 2) * SCALE,
             background: object.fill_color || 'transparent',
           }}
           onPointerDown={(event) => handleObjectPointerDown(event, object)}
@@ -343,10 +416,12 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
       );
     }
 
+    // Font size is in PDF points; multiply by SCALE so on-screen text matches
+    // the flattened/export output (the page itself renders at SCALE).
     const textStyle: React.CSSProperties = {
       ...style,
       color: object.color || '#000000',
-      fontSize: `${object.font_size || (object.type === 'signature' ? 20 : 14)}px`,
+      fontSize: `${(object.font_size || (object.type === 'signature' ? 20 : 14)) * SCALE}px`,
       fontFamily: object.type === 'signature' ? `"Times New Roman", serif` : object.font_family || 'Inter',
       fontStyle: object.type === 'signature' ? 'italic' : object.font_style || 'normal',
       fontWeight: object.font_weight?.toLowerCase() === 'bold' ? 600 : 400,
@@ -357,7 +432,7 @@ export const PDFCanvas: React.FC<PDFCanvasProps> = ({
       textAlign: object.align || 'left',
       background: object.type === 'comment' ? object.fill_color || '#fff6bf' : 'transparent',
       borderColor: object.type === 'comment' ? object.stroke_color || '#d7b200' : 'transparent',
-      borderWidth: object.type === 'comment' ? object.line_width || 1.5 : 1,
+      borderWidth: object.type === 'comment' ? (object.line_width || 1.5) * SCALE : 1,
     };
 
     return (

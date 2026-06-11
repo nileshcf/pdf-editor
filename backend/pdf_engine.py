@@ -464,44 +464,39 @@ def draw_shape(
     if not 1 <= page_number <= doc.page_count:
         raise IndexError("Page number out of bounds")
     page = doc[page_number - 1]
-    rect = fitz.Rect(bbox)
     if line_width <= 0:
         raise ValueError("line_width must be > 0")
-    if shape_type in {"rect", "circle"} and (rect.width <= 0 or rect.height <= 0):
+
+    # Lines/arrows are directional: bbox is [start_x, start_y, end_x, end_y]
+    # in any orientation.  Normalise only for the bounds check so the drawn
+    # direction is preserved.
+    x0, y0, x1, y1 = (float(v) for v in bbox)
+    norm = fitz.Rect(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+    if shape_type in {"rect", "circle"} and (norm.width <= 0 or norm.height <= 0):
         raise ValueError("Shape bbox must have positive width and height")
-    if rect.x0 < page.rect.x0 or rect.y0 < page.rect.y0 or rect.x1 > page.rect.x1 or rect.y1 > page.rect.y1:
+    if norm.x0 < page.rect.x0 or norm.y0 < page.rect.y0 or norm.x1 > page.rect.x1 or norm.y1 > page.rect.y1:
         raise ValueError("Shape bbox is outside page bounds")
     sc = hex_to_rgb01(stroke_color)
     fc = hex_to_rgb01(fill_color) if fill_color else None
 
-    shape = page.new_shape()
-    if shape_type == "rect":
-        shape.draw_rect(rect)
-    elif shape_type == "circle":
-        # center is middle of rect
-        center = fitz.Point((rect.x0 + rect.x1)/2, (rect.y0 + rect.y1)/2)
-        rx = rect.width / 2
-        ry = rect.height / 2
-        shape.draw_oval(rect)
-    elif shape_type == "line":
-        shape.draw_line(fitz.Point(rect.x0, rect.y0), fitz.Point(rect.x1, rect.y1))
-    elif shape_type == "arrow":
-        shape.draw_line(fitz.Point(rect.x0, rect.y0), fitz.Point(rect.x1, rect.y1))
-        # PyMuPDF doesn't have an arrow primitive in shape, so we add a line and then use line annotation? 
-        # Actually, draw_line doesn't add an arrowhead. We can just add a line annot if it's an arrow.
-        # But let's just stick to lines for simplicity, or add a line annot.
-        pass
-
     if shape_type == "arrow":
-        # Use an annotation for arrow
-        annot = page.add_line_annot(fitz.Point(rect.x0, rect.y0), fitz.Point(rect.x1, rect.y1))
+        # Annotation, because Shape has no arrowhead primitive.
+        annot = page.add_line_annot(fitz.Point(x0, y0), fitz.Point(x1, y1))
         annot.set_line_ends(0, fitz.PDF_ANNOT_LE_OPEN_ARROW)
         annot.set_colors(stroke=sc)
         annot.set_border(width=line_width)
         annot.update()
-    else:
-        shape.finish(color=sc, fill=fc, width=line_width)
-        shape.commit()
+        return
+
+    shape = page.new_shape()
+    if shape_type == "rect":
+        shape.draw_rect(norm)
+    elif shape_type == "circle":
+        shape.draw_oval(norm)
+    elif shape_type == "line":
+        shape.draw_line(fitz.Point(x0, y0), fitz.Point(x1, y1))
+    shape.finish(color=sc, fill=fc, width=line_width)
+    shape.commit()
 
 def add_highlight(doc: "fitz.Document", page_number: int, bbox: List[float], color: str) -> None:
     if not 1 <= page_number <= doc.page_count:
@@ -561,7 +556,9 @@ def flatten_objects(
             raise ValueError("Object bbox is outside page bounds")
 
         if obj_type == "image":
-            page.insert_image(rect, filename=asset_resolver(obj["asset_id"]))
+            # keep_proportion=False so the flattened image fills the frame the
+            # user sized on screen (the canvas renders it with object-fit: fill).
+            page.insert_image(rect, filename=asset_resolver(obj["asset_id"]), keep_proportion=False)
             continue
 
         if obj_type in {"text", "signature"}:

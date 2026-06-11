@@ -20,9 +20,9 @@ def _validate_rect(value: List[float], *, allow_line: bool = False) -> List[floa
     if len(value) != 4:
         raise ValueError("bbox must contain exactly four numbers")
     x0, y0, x1, y1 = [float(v) for v in value]
-    if x1 < x0 or y1 < y0:
-        raise ValueError("bbox must be ordered as [x0, y0, x1, y1]")
     if allow_line:
+        # Lines/arrows are directional: [x0, y0] is the start point and
+        # [x1, y1] the end point, so any orientation is valid except a dot.
         if x0 == x1 and y0 == y1:
             raise ValueError("bbox must span a visible area or line")
     elif x1 <= x0 or y1 <= y0:
@@ -198,14 +198,6 @@ class EditorObjectCreateRequest(BaseModel):
     line_width: float = Field(default=2.0, gt=0, le=24.0)
     asset_id: Optional[str] = None
 
-    @field_validator("bbox")
-    @classmethod
-    def validate_bbox(cls, value: List[float], info) -> List[float]:
-        object_type = info.data.get("type")
-        shape_type = info.data.get("shape_type")
-        allow_line = object_type == "shape" and shape_type in {"line", "arrow"}
-        return _validate_rect(value, allow_line=allow_line)
-
     @field_validator("color", "stroke_color")
     @classmethod
     def validate_hex_colors(cls, value: str) -> str:
@@ -218,6 +210,11 @@ class EditorObjectCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_object_fields(self) -> "EditorObjectCreateRequest":
+        # bbox is validated here (not in a field_validator) because the rules
+        # depend on shape_type, which is declared after bbox and therefore not
+        # yet parsed when a bbox field_validator runs.
+        allow_line = self.type == "shape" and self.shape_type in {"line", "arrow"}
+        self.bbox = _validate_rect(self.bbox, allow_line=allow_line)
         if self.type == "shape" and not self.shape_type:
             raise ValueError("shape_type is required for shape objects")
         if self.type == "image" and not self.asset_id:

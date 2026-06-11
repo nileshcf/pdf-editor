@@ -27,13 +27,16 @@ def _validate_object_bounds(session_id: str, page_number: int, bbox: List[float]
         if not 1 <= page_number <= doc.page_count:
             raise IndexError("Page number out of bounds")
         page = doc[page_number - 1]
-        rect = fitz.Rect(bbox)
+        # Lines/arrows keep their direction in the bbox (start -> end), so
+        # normalise before comparing against the page rectangle.
+        x0, y0, x1, y1 = (float(v) for v in bbox)
+        norm = fitz.Rect(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
         if allow_line:
-            if rect.x0 == rect.x1 and rect.y0 == rect.y1:
+            if x0 == x1 and y0 == y1:
                 raise ValueError("Object bbox must span a visible area or line")
-        elif rect.width <= 0 or rect.height <= 0:
+        elif norm.width <= 0 or norm.height <= 0:
             raise ValueError("Object bbox must have positive width and height")
-        if rect.x0 < page.rect.x0 or rect.y0 < page.rect.y0 or rect.x1 > page.rect.x1 or rect.y1 > page.rect.y1:
+        if norm.x0 < page.rect.x0 or norm.y0 < page.rect.y0 or norm.x1 > page.rect.x1 or norm.y1 > page.rect.y1:
             raise ValueError("Object bbox is outside page bounds")
     finally:
         doc.close()
@@ -138,11 +141,13 @@ async def reorder_objects(session_id: str, req: ObjectReorderRequest):
 @router.post("/flatten/{session_id}", response_model=EditResponse)
 async def flatten(session_id: str):
     get_session_or_404(session_id)
+    had_objects = bool(await run_in_threadpool(session_manager.load_objects, session_id))
     try:
         session = await run_in_threadpool(session_manager.flatten, session_id)
     except (IndexError, ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await run_in_threadpool(build_edit_response, session, "Flattened editor objects into the PDF.")
+    message = "Flattened editor objects into the PDF." if had_objects else "No editor objects to flatten."
+    return await run_in_threadpool(build_edit_response, session, message)
 
 
 @router.get("/assets/{session_id}/{asset_id}")
